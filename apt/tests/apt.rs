@@ -1,5 +1,7 @@
 //! Tests for the portable API and the APT process boundary.
-use neotales_ospm::{Install, PackageError, PackageName, Remove, apt::Apt};
+#![cfg(feature = "cli")]
+use neotales_ospm_apt::{Apt, PackageError};
+use neotales_ospm_core::{Install, PackageName, Remove};
 
 #[test]
 fn package_names_reject_options_and_shell_syntax() {

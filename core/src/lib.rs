@@ -3,12 +3,11 @@
 //! A backend implements only the operations it supports. The portable interface
 //! does not elevate privileges or assume that package names are interchangeable
 //! across managers.
-
-pub mod apt;
+#![doc = include_str!("../README.md")]
+#![forbid(unsafe_code)]
 
 use std::error::Error;
 use std::fmt;
-use std::process::ExitStatus;
 
 /// A package identifier in the target manager's own namespace.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -50,52 +49,20 @@ impl fmt::Display for InvalidPackageName {
 
 impl Error for InvalidPackageName {}
 
-/// A package-manager operation failed.
-#[derive(Debug)]
-pub enum PackageError {
-    /// The process could not be started or its output could not be read.
-    Io(std::io::Error),
-    /// The process returned a failure status.
-    CommandFailed {
-        /// Exit status, including signal termination where available.
-        status: ExitStatus,
-        /// Standard error as emitted by the manager.
-        stderr: Vec<u8>,
-    },
-}
-
-impl fmt::Display for PackageError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io(error) => write!(f, "package manager process: {error}"),
-            Self::CommandFailed { status, stderr } => {
-                write!(
-                    f,
-                    "package manager exited with {status}: {}",
-                    String::from_utf8_lossy(stderr)
-                )
-            }
-        }
-    }
-}
-
-impl Error for PackageError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Io(error) => Some(error),
-            Self::CommandFailed { .. } => None,
-        }
-    }
-}
-
 /// Installs a package using its manager-specific name.
 pub trait Install {
+    /// Backend-specific error, including native API errors when applicable.
+    type Error: Error + Send + Sync + 'static;
+
     /// Install a package; privilege and interaction policy belong to the caller.
-    fn install(&self, package: &PackageName) -> Result<(), PackageError>;
+    fn install(&self, package: &PackageName) -> Result<(), Self::Error>;
 }
 
 /// Removes a package using its manager-specific name.
 pub trait Remove {
+    /// Backend-specific error, including native API errors when applicable.
+    type Error: Error + Send + Sync + 'static;
+
     /// Remove a package without promising removal of configuration or dependencies.
-    fn remove(&self, package: &PackageName) -> Result<(), PackageError>;
+    fn remove(&self, package: &PackageName) -> Result<(), Self::Error>;
 }

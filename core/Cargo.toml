@@ -1,0 +1,14 @@
+[package]
+name = "neotales-ospm-core"
+description = "Portable capability traits for operating system package managers"
+version = "0.0.0-alpha.0"
+edition = "2024"
+rust-version = "1.100"
+license = "MIT"
+authors = ["x0craft"]
+repository = "https://github.com/neotales/rs-ospm"
+readme = "README.md"
+categories = ["os"]
+
+[lints]
+workspace = true

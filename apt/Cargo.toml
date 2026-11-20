@@ -1,0 +1,21 @@
+[package]
+name = "neotales-ospm-apt"
+description = "APT backend for operating system package management"
+version = "0.0.0-alpha.0"
+edition = "2024"
+rust-version = "1.100"
+license = "MIT"
+authors = ["x0craft"]
+repository = "https://github.com/neotales/rs-ospm"
+readme = "README.md"
+categories = ["os"]
+
+[features]
+default = []
+cli = ["dep:neotales-ospm-core"]
+
+[dependencies]
+neotales-ospm-core = { path = "../core", version = "0.0.0-alpha.0", optional = true }
+
+[lints]
+workspace = true
