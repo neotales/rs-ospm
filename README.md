@@ -23,4 +23,5 @@ Pacman's shim similarly loads GPL-2.0-or-later libalpm. Pacman currently
 supports native installed-package listing and CLI install and remove only.
 
 See [backend research](docs/backend-research.md) for the other requested
-managers and their native API and licensing status.
+OS managers, the separate programming-language tooling list, and their native
+API and licensing status.
