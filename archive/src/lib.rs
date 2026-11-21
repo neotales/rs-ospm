@@ -2,6 +2,7 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
+use std::cell::Cell;
 use std::error::Error;
 use std::ffi::OsString;
 use std::fmt;
@@ -20,6 +21,16 @@ use tempfile::NamedTempFile;
 pub const DEFAULT_DOWNLOAD_LIMIT: u64 = 512 * 1024 * 1024;
 /// Maximum installed executable size in bytes.
 pub const DEFAULT_FILE_LIMIT: u64 = 256 * 1024 * 1024;
+/// Maximum total decompressed tar scan work in bytes.
+///
+/// This budget covers headers, padding, metadata and skipped members, and is
+/// shared by the executable and archive-script selections of one install.
+pub const DEFAULT_SCAN_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
+/// Maximum bytes buffered for one GNU long-name or long-link metadata member.
+/// Larger metadata is rejected before it is read into memory. PAX extended
+/// headers, local or global, and GNU sparse members are rejected rather than
+/// parsed.
+pub const DEFAULT_METADATA_LIMIT: u64 = 64 * 1024;
 
 /// Supported archive formats. `tar.xz` is the XZ-compressed tar format.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -77,6 +88,9 @@ pub struct PostInstall {
 /// The script
 /// inherits the caller's environment and privileges and may do anything the
 /// caller can, so only request one from an archive and checksum you trust.
+///
+/// The selector is used verbatim: [`InstallOptions::normalize_exe_suffix`] does
+/// not apply to archive-script selectors.
 #[derive(Clone, Debug)]
 pub struct ArchiveScript {
     /// Glob or regular expression selecting exactly one regular file.
@@ -112,6 +126,20 @@ pub struct InstallOptions {
     pub max_download_bytes: u64,
     /// Extracted file limit in bytes.
     pub max_file_bytes: u64,
+    /// Maximum decompressed tar bytes read across all member selections,
+    /// including skipped members, headers, padding and metadata.
+    pub max_scan_bytes: u64,
+    /// Maximum bytes buffered for one GNU long-name or long-link metadata
+    /// member. Larger metadata is rejected before it is read into memory.
+    /// PAX extended headers, local or global, and GNU sparse members are
+    /// rejected rather than parsed.
+    pub max_metadata_bytes: u64,
+    /// Remove a trailing `.exe` from the executable selector, rename and
+    /// selected filename on non-Windows systems. Enabled by default, which is
+    /// the existing behaviour. Disable it when the selector is exact and the
+    /// archive really contains an `.exe` member, so grep and rename are used
+    /// untouched. Archive-script selectors are never rewritten either way.
+    pub normalize_exe_suffix: bool,
     /// Optional command run only after successful installation.
     pub post_install: Option<PostInstall>,
     /// Optional archive-provided script to extract and execute after
@@ -137,6 +165,9 @@ impl InstallOptions {
             sha256: sha256.into(),
             max_download_bytes: DEFAULT_DOWNLOAD_LIMIT,
             max_file_bytes: DEFAULT_FILE_LIMIT,
+            max_scan_bytes: DEFAULT_SCAN_LIMIT,
+            max_metadata_bytes: DEFAULT_METADATA_LIMIT,
+            normalize_exe_suffix: true,
             post_install: None,
             archive_script: None,
         }
@@ -160,14 +191,42 @@ pub enum InstallError {
     ChecksumMismatch,
     /// The requested size limit was exceeded.
     SizeLimit,
+    /// The decompressed tar scan budget was exhausted.
+    ScanLimit,
     /// No regular archive entry matched.
     NoMatch,
     /// More than one regular archive entry matched.
     MultipleMatches,
     /// The explicit post-install command failed after the file was installed.
-    PostInstallFailed(ExitStatus),
+    PostInstallFailed {
+        /// Exit status returned by the command.
+        status: ExitStatus,
+        /// Destination that was already installed.
+        installed: PathBuf,
+    },
+    /// The explicit post-install command could not be started after the file
+    /// was installed.
+    PostInstallSpawnFailed {
+        /// Spawn failure.
+        source: io::Error,
+        /// Destination that was already installed.
+        installed: PathBuf,
+    },
     /// The explicitly requested archive script failed to run successfully.
-    ScriptFailed(ExitStatus),
+    ScriptFailed {
+        /// Exit status returned by the script.
+        status: ExitStatus,
+        /// Destination that was already installed.
+        installed: PathBuf,
+    },
+    /// The explicitly requested archive script could not be started after the
+    /// file was installed.
+    ScriptSpawnFailed {
+        /// Spawn failure.
+        source: io::Error,
+        /// Destination that was already installed.
+        installed: PathBuf,
+    },
 }
 impl fmt::Display for InstallError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -179,15 +238,29 @@ impl fmt::Display for InstallError {
             Self::Zip(e) => write!(f, "ZIP archive: {e}"),
             Self::ChecksumMismatch => f.write_str("archive SHA-256 checksum mismatch"),
             Self::SizeLimit => f.write_str("archive size limit exceeded"),
+            Self::ScanLimit => f.write_str("archive scan limit exceeded"),
             Self::NoMatch => f.write_str("no archive member matched"),
             Self::MultipleMatches => f.write_str("multiple archive members matched"),
-            Self::PostInstallFailed(status) => write!(
+            Self::PostInstallFailed { status, installed } => write!(
                 f,
-                "post-install command failed after installation: {status}"
+                "post-install command failed after installing {}: {status}",
+                installed.display()
             ),
-            Self::ScriptFailed(status) => {
-                write!(f, "archive script failed after installation: {status}")
-            }
+            Self::PostInstallSpawnFailed { source, installed } => write!(
+                f,
+                "post-install command could not start after installing {}: {source}",
+                installed.display()
+            ),
+            Self::ScriptFailed { status, installed } => write!(
+                f,
+                "archive script failed after installing {}: {status}",
+                installed.display()
+            ),
+            Self::ScriptSpawnFailed { source, installed } => write!(
+                f,
+                "archive script could not start after installing {}: {source}",
+                installed.display()
+            ),
         }
     }
 }
@@ -197,6 +270,8 @@ impl Error for InstallError {
             Self::Io(e) => Some(e),
             Self::Http(e) => Some(e),
             Self::Zip(e) => Some(e),
+            Self::PostInstallSpawnFailed { source, .. } => Some(source),
+            Self::ScriptSpawnFailed { source, .. } => Some(source),
             _ => None,
         }
     }
@@ -219,10 +294,10 @@ enum Matcher {
 impl Matcher {
     fn new(selector: &Selector) -> Result<Self, InstallError> {
         match selector {
-            Selector::Glob(pattern) => Glob::new(&normalize_exe(pattern))
+            Selector::Glob(pattern) => Glob::new(pattern)
                 .map(|x| Self::Glob(x.compile_matcher()))
                 .map_err(|e| InstallError::Pattern(e.to_string())),
-            Selector::Regex(pattern) => Regex::new(&normalize_exe(pattern))
+            Selector::Regex(pattern) => Regex::new(pattern)
                 .map(Self::Regex)
                 .map_err(|e| InstallError::Pattern(e.to_string())),
         }
@@ -235,11 +310,137 @@ impl Matcher {
     }
 }
 
-fn normalize_exe(value: &str) -> String {
+/// Remove a trailing `.exe` that is used as a literal filename suffix.
+///
+/// Only the suffix is considered: names such as `tool.exe.bak` and
+/// `tool.exe-backup` keep their embedded `.exe`.
+fn strip_exe_suffix(name: &str) -> &str {
     if cfg!(windows) {
-        value.to_owned()
+        name
     } else {
-        value.replace(r"\.exe", "").replace(".exe", "")
+        name.strip_suffix(".exe").unwrap_or(name)
+    }
+}
+
+/// Rewrite an executable selector's intended `.exe` suffix on non-Windows.
+///
+/// A glob may end in `.exe` (literal) or `\.exe` (escaped); a regex may end in
+/// `\.exe` optionally followed by `$`. Embedded or arbitrary `.exe` text is
+/// left alone, and a rewrite that would not compile is discarded. Callers must
+/// not apply this to archive-script selectors.
+fn normalize_selector(selector: &Selector) -> Selector {
+    if cfg!(windows) {
+        return selector.clone();
+    }
+    match selector {
+        Selector::Glob(pattern) => {
+            let stripped = pattern
+                .strip_suffix(r"\.exe")
+                .or_else(|| pattern.strip_suffix(".exe"));
+            match stripped {
+                Some(stripped) if !stripped.is_empty() && Glob::new(stripped).is_ok() => {
+                    Selector::Glob(stripped.to_owned())
+                }
+                _ => selector.clone(),
+            }
+        }
+        Selector::Regex(pattern) => {
+            let (body, anchor) = match pattern.strip_suffix('$') {
+                Some(body) => (body, "$"),
+                None => (pattern.as_str(), ""),
+            };
+            match body.strip_suffix(r"\.exe") {
+                Some(body) if !body.is_empty() => Selector::Regex(format!("{body}{anchor}")),
+                _ => selector.clone(),
+            }
+        }
+    }
+}
+
+/// Shared decompressed-byte budget for tar scanning.
+///
+/// Tar streams do not allow random access, so selecting one member still reads
+/// every preceding header and skips every preceding member. The budget counts
+/// all of those decompressed bytes, across every scan of one install.
+struct ScanBudget(Cell<u64>);
+
+impl ScanBudget {
+    fn new(bytes: u64) -> Self {
+        Self(Cell::new(bytes))
+    }
+}
+
+/// Marker for a scan-budget failure inside otherwise generic I/O errors.
+#[derive(Debug)]
+struct ScanLimitHit;
+
+impl fmt::Display for ScanLimitHit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("archive scan limit exceeded")
+    }
+}
+impl Error for ScanLimitHit {}
+
+fn scan_limit_error() -> io::Error {
+    io::Error::other(ScanLimitHit)
+}
+
+fn is_scan_limit(error: &(dyn Error + 'static)) -> bool {
+    let mut next = Some(error);
+    while let Some(error) = next {
+        if error.is::<ScanLimitHit>() {
+            return true;
+        }
+        // `io::Error` keeps a custom payload reachable through `get_ref` but,
+        // on the current standard library, does not expose it via `source`.
+        if let Some(io) = error.downcast_ref::<io::Error>()
+            && io.get_ref().is_some_and(|inner| inner.is::<ScanLimitHit>())
+        {
+            return true;
+        }
+        next = error.source();
+    }
+    false
+}
+
+fn tar_io(error: io::Error) -> InstallError {
+    if is_scan_limit(&error) {
+        InstallError::ScanLimit
+    } else {
+        InstallError::Io(error)
+    }
+}
+
+/// Reader wrapper that charges every byte read against a shared budget.
+///
+/// The wrapper never silently reports EOF to hide the limit: at the boundary it
+/// probes one byte and returns an error when data remains, so a truncated scan
+/// cannot be mistaken for a complete archive.
+struct LimitedReader<'a, R> {
+    inner: R,
+    budget: &'a ScanBudget,
+}
+
+impl<R: Read> Read for LimitedReader<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let remaining = self.budget.0.get();
+        if remaining == 0 {
+            let mut probe = [0u8; 1];
+            return match self.inner.read(&mut probe) {
+                Ok(0) => Ok(0),
+                Ok(_) => Err(scan_limit_error()),
+                Err(error) => Err(error),
+            };
+        }
+        let cap = buf
+            .len()
+            .min(usize::try_from(remaining).unwrap_or(usize::MAX));
+        let count = self.inner.read(&mut buf[..cap])?;
+        self.budget.0.set(remaining - count as u64);
+        Ok(count)
     }
 }
 
@@ -305,7 +506,9 @@ pub fn install_https(url: &str, options: &InstallOptions) -> Result<PathBuf, Ins
 ///
 /// The stream is bounded by `max_download_bytes` and is never unpacked before
 /// its SHA-256 matches. This method does not authenticate the source of the
-/// caller-provided checksum. An [`InstallOptions::archive_script`] runs only
+/// caller-provided checksum. Tar scanning is bounded by `max_scan_bytes`, which
+/// counts skipped members and headers and is shared with an
+/// [`InstallOptions::archive_script`] selection. An archive script runs only
 /// after the digest matches and is bounded by `max_file_bytes`.
 pub fn install_reader(
     mut reader: impl Read,
@@ -356,21 +559,38 @@ pub fn install_verified_archive(
 }
 
 fn install_inner(file: &mut File, options: &InstallOptions) -> Result<PathBuf, InstallError> {
-    let matcher = Matcher::new(&options.grep)?;
+    let grep = if options.normalize_exe_suffix {
+        normalize_selector(&options.grep)
+    } else {
+        options.grep.clone()
+    };
+    let matcher = Matcher::new(&grep)?;
     if let Some(name) = &options.rename {
-        validate_name(&normalize_exe(name))?;
+        let name = if options.normalize_exe_suffix {
+            strip_exe_suffix(name)
+        } else {
+            name
+        };
+        validate_name(name)?;
     }
+    // One budget covers every selection of this install, including the second
+    // scan performed for an archive-provided script.
+    let scan = ScanBudget::new(options.max_scan_bytes);
     // Validate and extract an explicitly requested script before touching the
     // destination, so an unsafe or oversized script aborts the install.
     let script = match &options.archive_script {
-        Some(script) => Some(prepare_script(file, options, script)?),
+        Some(script) => Some(prepare_script(file, options, script, &scan)?),
         None => None,
     };
     let mut staged = NamedTempFile::new_in(&options.target_dir)?;
-    let selected = select_member(file, options, &matcher, &mut staged)?;
+    let selected = select_member(file, options, &matcher, &mut staged, &scan)?;
     let name = options.rename.as_deref().unwrap_or(&selected);
-    let name = normalize_exe(name);
-    validate_name(&name)?;
+    let name = if options.normalize_exe_suffix {
+        strip_exe_suffix(name)
+    } else {
+        name
+    };
+    validate_name(name)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -383,14 +603,21 @@ fn install_inner(file: &mut File, options: &InstallOptions) -> Result<PathBuf, I
         .persist_noclobber(&target)
         .map_err(|e| InstallError::Io(e.error))?;
     if let (Some(script), Some((dir, staged))) = (&options.archive_script, script) {
-        run_script(&dir, &staged, script)?;
+        run_script(&dir, &staged, script, &target)?;
     }
     if let Some(command) = &options.post_install {
-        let status = Command::new(&command.program)
-            .args(&command.args)
-            .status()?;
+        let status =
+            run_command(Command::new(&command.program).args(&command.args)).map_err(|source| {
+                InstallError::PostInstallSpawnFailed {
+                    source,
+                    installed: target.clone(),
+                }
+            })?;
         if !status.success() {
-            return Err(InstallError::PostInstallFailed(status));
+            return Err(InstallError::PostInstallFailed {
+                status,
+                installed: target,
+            });
         }
     }
     Ok(target)
@@ -401,28 +628,42 @@ fn select_member(
     options: &InstallOptions,
     matcher: &Matcher,
     dest: &mut NamedTempFile,
+    scan: &ScanBudget,
 ) -> Result<String, InstallError> {
     file.rewind()?;
     match options.format {
         Format::Zip => select_zip(file, matcher, dest, options.max_file_bytes),
-        Format::Tar => select_tar(file, matcher, dest, options.max_file_bytes),
+        Format::Tar => select_tar(
+            file,
+            matcher,
+            dest,
+            options.max_file_bytes,
+            options.max_metadata_bytes,
+            scan,
+        ),
         Format::TarGz => select_tar(
             flate2::read::GzDecoder::new(file),
             matcher,
             dest,
             options.max_file_bytes,
+            options.max_metadata_bytes,
+            scan,
         ),
         Format::TarXz => select_tar(
             xz2::read::XzDecoder::new(file),
             matcher,
             dest,
             options.max_file_bytes,
+            options.max_metadata_bytes,
+            scan,
         ),
         Format::TarBz2 => select_tar(
             bzip2::read::BzDecoder::new(file),
             matcher,
             dest,
             options.max_file_bytes,
+            options.max_metadata_bytes,
+            scan,
         ),
     }
 }
@@ -436,10 +677,11 @@ fn prepare_script(
     file: &mut File,
     options: &InstallOptions,
     script: &ArchiveScript,
+    scan: &ScanBudget,
 ) -> Result<(tempfile::TempDir, tempfile::TempPath), InstallError> {
     #[cfg(not(unix))]
     {
-        let _ = (file, options, script);
+        let _ = (file, options, script, scan);
         return Err(InstallError::Invalid(
             "archive scripts are not supported on this platform",
         ));
@@ -449,7 +691,7 @@ fn prepare_script(
         let matcher = Matcher::new(&script.selector)?;
         let dir = tempfile::TempDir::new()?;
         let mut staged = NamedTempFile::new_in(dir.path())?;
-        select_member(file, options, &matcher, &mut staged)?;
+        select_member(file, options, &matcher, &mut staged, scan)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -496,20 +738,53 @@ fn validate_shebang(file: &mut File) -> Result<(), InstallError> {
 /// Execute a prepared archive script without an explicit shell wrapper.
 ///
 /// `args` are passed verbatim and the private temporary directory is the
-/// working directory; the caller's environment is inherited.
+/// working directory; the caller's environment is inherited. Failures carry the
+/// destination that was already installed, because installation happens before
+/// the script runs.
 fn run_script(
     dir: &tempfile::TempDir,
     staged: &tempfile::TempPath,
     script: &ArchiveScript,
-) -> Result<ExitStatus, InstallError> {
-    let status = Command::new(staged)
-        .args(&script.args)
-        .current_dir(dir.path())
-        .status()?;
+    installed: &Path,
+) -> Result<(), InstallError> {
+    let status = run_command(
+        Command::new(staged)
+            .args(&script.args)
+            .current_dir(dir.path()),
+    )
+    .map_err(|source| InstallError::ScriptSpawnFailed {
+        source,
+        installed: installed.to_path_buf(),
+    })?;
     if status.success() {
-        Ok(status)
+        Ok(())
     } else {
-        Err(InstallError::ScriptFailed(status))
+        Err(InstallError::ScriptFailed {
+            status,
+            installed: installed.to_path_buf(),
+        })
+    }
+}
+
+/// Start a command, retrying the transient `ETXTBSY` race.
+///
+/// The script handle is closed before execution, but another thread in the
+/// same process can fork while a writable descriptor is briefly inherited,
+/// leaving the inode write-busy until that child execs. A bounded retry turns
+/// that race into a short wait instead of failing a valid script.
+fn run_command(command: &mut Command) -> io::Result<ExitStatus> {
+    const RETRIES: u32 = 20;
+    let mut attempts = 0;
+    loop {
+        match command.status() {
+            Err(error)
+                if error.kind() == io::ErrorKind::ExecutableFileBusy && attempts < RETRIES =>
+            {
+                attempts += 1;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            result => return result,
+        }
     }
 }
 
@@ -530,7 +805,7 @@ fn copy_bounded(
     dest: &mut NamedTempFile,
     max: u64,
 ) -> Result<(), InstallError> {
-    let copied = io::copy(&mut reader.take(max.saturating_add(1)), dest)?;
+    let copied = io::copy(&mut reader.take(max.saturating_add(1)), dest).map_err(tar_io)?;
     if copied > max {
         return Err(InstallError::SizeLimit);
     }
@@ -572,20 +847,61 @@ fn select_tar(
     matcher: &Matcher,
     dest: &mut NamedTempFile,
     max: u64,
+    metadata_limit: u64,
+    scan: &ScanBudget,
 ) -> Result<String, InstallError> {
-    let mut archive = tar::Archive::new(reader);
+    let mut archive = tar::Archive::new(LimitedReader {
+        inner: reader,
+        budget: scan,
+    });
     let mut selected = None;
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        let path = entry
-            .path()?
-            .to_str()
-            .ok_or(InstallError::Invalid("archive path is not UTF-8"))?
-            .to_owned();
+    // GNU long names describe the next member. Parse them ourselves instead of
+    // letting `tar` buffer them: `Entries` reads those metadata bodies into a
+    // `Vec` with no memory bound.
+    let mut pending_name: Option<Vec<u8>> = None;
+    for entry in archive.entries().map_err(tar_io)?.raw(true) {
+        let mut entry = entry.map_err(tar_io)?;
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_gnu_longname() {
+            if pending_name.is_some() {
+                return Err(InstallError::Invalid(
+                    "two long names describe the same archive member",
+                ));
+            }
+            let size = entry.size();
+            pending_name = Some(read_tar_metadata(&mut entry, size, metadata_limit)?);
+            continue;
+        }
+        if entry_type.is_gnu_longlink() {
+            check_metadata_size(entry.size(), metadata_limit)?;
+            continue;
+        }
+        if entry_type.is_pax_local_extensions() || entry_type.is_pax_global_extensions() {
+            // PAX-aware readers apply local and global `path`/`size` records,
+            // which can change member identity and the bytes of the next
+            // member. Raw mode cannot reproduce that safely, so reject both.
+            return Err(InstallError::Invalid(
+                "PAX extended tar metadata is not supported",
+            ));
+        }
+        if entry_type.is_gnu_sparse() {
+            return Err(InstallError::Invalid(
+                "GNU sparse tar members are not supported",
+            ));
+        }
+        let path = match pending_name.take() {
+            Some(bytes) => longname_to_string(bytes)?,
+            None => entry
+                .path()
+                .map_err(tar_io)?
+                .to_str()
+                .ok_or(InstallError::Invalid("archive path is not UTF-8"))?
+                .to_owned(),
+        };
         if !matcher.matches(&path) {
             continue;
         }
-        if !entry.header().entry_type().is_file() {
+        if !entry_type.is_file() {
             return Err(InstallError::Invalid(
                 "selected tar member is not a regular file",
             ));
@@ -596,5 +912,47 @@ fn select_tar(
         selected = Some(basename(&path)?);
         copy_bounded(&mut entry, dest, max)?;
     }
+    if pending_name.is_some() {
+        return Err(InstallError::Invalid(
+            "archive metadata does not describe a member",
+        ));
+    }
     selected.ok_or(InstallError::NoMatch)
+}
+
+fn check_metadata_size(size: u64, limit: u64) -> Result<(), InstallError> {
+    if size > limit {
+        return Err(InstallError::Invalid(
+            "tar metadata exceeds the configured memory limit",
+        ));
+    }
+    Ok(())
+}
+
+/// Read one GNU metadata body, rejecting it before buffering when its header
+/// size is over the limit.
+fn read_tar_metadata(
+    entry: &mut impl Read,
+    size: u64,
+    limit: u64,
+) -> Result<Vec<u8>, InstallError> {
+    check_metadata_size(size, limit)?;
+    let mut data = Vec::new();
+    entry
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut data)
+        .map_err(tar_io)?;
+    if data.len() as u64 > limit {
+        return Err(InstallError::Invalid(
+            "tar metadata exceeds the configured memory limit",
+        ));
+    }
+    Ok(data)
+}
+
+fn longname_to_string(mut bytes: Vec<u8>) -> Result<String, InstallError> {
+    if bytes.last() == Some(&0) {
+        bytes.pop();
+    }
+    String::from_utf8(bytes).map_err(|_| InstallError::Invalid("archive path is not UTF-8"))
 }

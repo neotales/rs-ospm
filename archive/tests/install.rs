@@ -2,7 +2,8 @@
 use std::io::{Cursor, Write};
 
 use neotales_ospm_archive::{
-    Format, InstallError, InstallOptions, Selector, install_reader, install_verified_archive,
+    DEFAULT_METADATA_LIMIT, Format, InstallError, InstallOptions, Selector, install_reader,
+    install_verified_archive,
 };
 use sha2::{Digest, Sha256};
 
@@ -16,6 +17,54 @@ fn tar_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
         builder.append_data(&mut header, name, *bytes).unwrap();
     }
     builder.into_inner().unwrap()
+}
+
+fn append_tar_entry(
+    builder: &mut tar::Builder<Vec<u8>>,
+    entry_type: tar::EntryType,
+    name: &str,
+    data: &[u8],
+) {
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(entry_type);
+    header.set_size(data.len() as u64);
+    header.set_mode(0o644);
+    header.set_cksum();
+    builder.append_data(&mut header, name, data).unwrap();
+}
+
+fn tar_with_gnu_longname(long_name: &str) -> Vec<u8> {
+    let mut builder = tar::Builder::new(Vec::new());
+    let mut body = long_name.as_bytes().to_vec();
+    body.push(0);
+    append_tar_entry(
+        &mut builder,
+        tar::EntryType::GNULongName,
+        "././@LongLink",
+        &body,
+    );
+    append_tar_entry(&mut builder, tar::EntryType::Regular, "bin/tool", b"binary");
+    builder.into_inner().unwrap()
+}
+
+fn tar_with_gnu_longlink(long_link: &str) -> Vec<u8> {
+    let mut builder = tar::Builder::new(Vec::new());
+    let mut body = long_link.as_bytes().to_vec();
+    body.push(0);
+    append_tar_entry(
+        &mut builder,
+        tar::EntryType::GNULongLink,
+        "././@LongLink",
+        &body,
+    );
+    append_tar_entry(&mut builder, tar::EntryType::Regular, "bin/tool", b"binary");
+    builder.into_inner().unwrap()
+}
+
+fn gzip(bytes: &[u8]) -> Vec<u8> {
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(bytes).unwrap();
+    encoder.finish().unwrap()
 }
 
 fn options(dir: &std::path::Path, format: Format) -> InstallOptions {
@@ -152,6 +201,235 @@ fn exe_suffix_is_removed_from_patterns_and_renames() {
     opts.rename = Some("custom.exe".into());
     let path = install(&tar_bytes(&[("bin/tool", b"binary")]), &opts).unwrap();
     assert_eq!(path.file_name().unwrap(), "custom");
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = options(dir.path(), Format::Tar);
+    opts.grep = Selector::Glob("*/tool.exe".into());
+    let path = install(&tar_bytes(&[("bin/tool", b"binary")]), &opts).unwrap();
+    assert_eq!(path.file_name().unwrap(), "tool");
+}
+
+#[cfg(not(windows))]
+#[test]
+fn exe_embedded_in_pattern_or_rename_is_not_rewritten() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = options(dir.path(), Format::Tar);
+    opts.grep = Selector::Regex(r"^bin/tool\.exe-backup$".into());
+    opts.rename = Some("custom.exe.bak".into());
+    let path = install(&tar_bytes(&[("bin/tool.exe-backup", b"binary")]), &opts).unwrap();
+    assert_eq!(path.file_name().unwrap(), "custom.exe.bak");
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = options(dir.path(), Format::Tar);
+    opts.grep = Selector::Regex(r"^bin/tool\.exe\.bak$".into());
+    let path = install(&tar_bytes(&[("bin/tool.exe.bak", b"binary")]), &opts).unwrap();
+    assert_eq!(path.file_name().unwrap(), "tool.exe.bak");
+}
+
+#[cfg(not(windows))]
+#[test]
+fn exe_normalization_can_be_disabled() {
+    let tar = tar_bytes(&[("bin/tool.exe", b"exe-binary"), ("bin/tool", b"plain")]);
+    let dir = tempfile::tempdir().unwrap();
+    assert!(options(dir.path(), Format::Tar).normalize_exe_suffix);
+
+    let mut opts = options(dir.path(), Format::Tar);
+    opts.grep = Selector::Regex(r"^bin/tool\.exe$".into());
+    opts.rename = Some("tool.exe".into());
+    opts.normalize_exe_suffix = false;
+    let path = install(&tar, &opts).unwrap();
+    assert_eq!(path.file_name().unwrap(), "tool.exe");
+    assert_eq!(std::fs::read(path).unwrap(), b"exe-binary");
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = options(dir.path(), Format::Tar);
+    opts.grep = Selector::Regex(r"^bin/tool\.exe$".into());
+    opts.rename = Some("tool.exe".into());
+    let path = install(&tar, &opts).unwrap();
+    assert_eq!(path.file_name().unwrap(), "tool");
+    assert_eq!(std::fs::read(path).unwrap(), b"plain");
+}
+
+#[test]
+fn scan_limit_counts_skipped_compressed_members() {
+    let big = vec![0u8; 1024 * 1024];
+    let tar = tar_bytes(&[("other/big", &big), ("bin/tool", b"binary")]);
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gz.write_all(&tar).unwrap();
+    let archive = gz.finish().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = options(dir.path(), Format::TarGz);
+    opts.sha256 = format!("{:x}", Sha256::digest(&archive));
+    opts.max_scan_bytes = 4096;
+    let result = install_reader(Cursor::new(&archive), &opts);
+    assert!(
+        matches!(result, Err(InstallError::ScanLimit)),
+        "unexpected: {result:?}"
+    );
+    assert!(!dir.path().join("tool").exists());
+}
+
+#[test]
+fn max_metadata_bytes_defaults_to_bounded_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(
+        options(dir.path(), Format::Tar).max_metadata_bytes,
+        DEFAULT_METADATA_LIMIT
+    );
+}
+
+#[test]
+fn gnu_long_name_within_limit_still_installs() {
+    let long_path = format!("bin/{}/tool", "a".repeat(120));
+    let tar = tar_with_gnu_longname(&long_path);
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = options(dir.path(), Format::Tar);
+    opts.grep = Selector::Glob("bin/*/tool".into());
+    let path = install(&tar, &opts).unwrap();
+    assert_eq!(path.file_name().unwrap(), "tool");
+    assert_eq!(std::fs::read(path).unwrap(), b"binary");
+}
+
+#[test]
+fn rejects_oversized_gnu_metadata_in_compressed_archive() {
+    let long_name = format!("bin/{}/tool", "a".repeat(1024 * 1024));
+    let archive = gzip(&tar_with_gnu_longname(&long_name));
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = options(dir.path(), Format::TarGz);
+    opts.sha256 = format!("{:x}", Sha256::digest(&archive));
+    let result = install_reader(Cursor::new(&archive), &opts);
+    assert!(
+        matches!(result, Err(InstallError::Invalid(_))),
+        "unexpected: {result:?}"
+    );
+    assert!(!dir.path().join("tool").exists());
+}
+
+#[test]
+fn small_gnu_longlink_is_ignored() {
+    let archive = tar_with_gnu_longlink("bin/tool-link");
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = options(dir.path(), Format::Tar);
+    opts.grep = Selector::Glob("bin/tool".into());
+    let path = install(&archive, &opts).unwrap();
+    assert_eq!(std::fs::read(path).unwrap(), b"binary");
+}
+
+#[test]
+fn rejects_oversized_gnu_longlink_before_install() {
+    let archive = tar_with_gnu_longlink(&"l".repeat(1024 * 1024));
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = options(dir.path(), Format::Tar);
+    opts.grep = Selector::Glob("bin/tool".into());
+    let result = install(&archive, &opts);
+    assert!(
+        matches!(result, Err(InstallError::Invalid(_))),
+        "unexpected: {result:?}"
+    );
+    assert!(!dir.path().join("tool").exists());
+}
+
+#[test]
+fn rejects_pax_local_extended_headers_before_install() {
+    let mut builder = tar::Builder::new(Vec::new());
+    append_tar_entry(
+        &mut builder,
+        tar::EntryType::XHeader,
+        "pax_header",
+        b"path=bin/tool\n",
+    );
+    append_tar_entry(&mut builder, tar::EntryType::Regular, "bin/tool", b"binary");
+    let archive = builder.into_inner().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = options(dir.path(), Format::Tar);
+    opts.grep = Selector::Glob("bin/tool".into());
+    let result = install(&archive, &opts);
+    assert!(
+        matches!(result, Err(InstallError::Invalid(_))),
+        "unexpected: {result:?}"
+    );
+    assert!(!dir.path().join("tool").exists());
+}
+
+#[test]
+fn rejects_global_pax_path_override_before_install() {
+    let mut builder = tar::Builder::new(Vec::new());
+    append_tar_entry(
+        &mut builder,
+        tar::EntryType::XGlobalHeader,
+        "pax_global_header",
+        b"22 path=bin/evil/tool\n",
+    );
+    append_tar_entry(&mut builder, tar::EntryType::Regular, "bin/tool", b"binary");
+    let archive = builder.into_inner().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = options(dir.path(), Format::Tar);
+    opts.grep = Selector::Glob("bin/tool".into());
+    let result = install(&archive, &opts);
+    assert!(
+        matches!(result, Err(InstallError::Invalid(_))),
+        "unexpected: {result:?}"
+    );
+    assert!(!dir.path().join("tool").exists());
+}
+
+#[test]
+fn rejects_global_pax_size_override_before_install() {
+    let mut builder = tar::Builder::new(Vec::new());
+    append_tar_entry(
+        &mut builder,
+        tar::EntryType::XGlobalHeader,
+        "pax_global_header",
+        b"16 size=1048576\n",
+    );
+    append_tar_entry(&mut builder, tar::EntryType::Regular, "bin/tool", b"binary");
+    let archive = builder.into_inner().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = options(dir.path(), Format::Tar);
+    opts.grep = Selector::Glob("bin/tool".into());
+    let result = install(&archive, &opts);
+    assert!(
+        matches!(result, Err(InstallError::Invalid(_))),
+        "unexpected: {result:?}"
+    );
+    assert!(!dir.path().join("tool").exists());
+}
+
+#[test]
+fn rejects_gnu_sparse_members_before_install() {
+    let mut builder = tar::Builder::new(Vec::new());
+    append_tar_entry(&mut builder, tar::EntryType::GNUSparse, "bin/sparse", b"");
+    append_tar_entry(&mut builder, tar::EntryType::Regular, "bin/tool", b"binary");
+    let archive = builder.into_inner().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = options(dir.path(), Format::Tar);
+    opts.grep = Selector::Glob("bin/tool".into());
+    let result = install(&archive, &opts);
+    assert!(
+        matches!(result, Err(InstallError::Invalid(_))),
+        "unexpected: {result:?}"
+    );
+    assert!(!dir.path().join("tool").exists());
+}
+
+#[test]
+fn rejects_dangling_gnu_long_name() {
+    let mut builder = tar::Builder::new(Vec::new());
+    append_tar_entry(
+        &mut builder,
+        tar::EntryType::GNULongName,
+        "././@LongLink",
+        b"bin/tool\0",
+    );
+    let archive = builder.into_inner().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let opts = options(dir.path(), Format::Tar);
+    let result = install(&archive, &opts);
+    assert!(
+        matches!(result, Err(InstallError::Invalid(_))),
+        "unexpected: {result:?}"
+    );
+    assert!(!dir.path().join("tool").exists());
 }
 
 #[cfg(unix)]
@@ -166,9 +444,30 @@ fn failing_explicit_command_keeps_installed_file() {
     });
     assert!(matches!(
         install(&tar_bytes(&[("bin/tool", b"binary")]), &opts),
-        Err(InstallError::PostInstallFailed(_))
+        Err(InstallError::PostInstallFailed { .. })
     ));
     assert_eq!(std::fs::read(dir.path().join("tool")).unwrap(), b"binary");
+}
+
+#[cfg(unix)]
+#[test]
+fn post_install_spawn_failure_reports_installed_file() {
+    use neotales_ospm_archive::PostInstall;
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = options(dir.path(), Format::Tar);
+    opts.post_install = Some(PostInstall {
+        program: "/nonexistent/neotales-ospm-missing".into(),
+        args: vec![],
+    });
+    let installed = dir.path().join("tool");
+    match install(&tar_bytes(&[("bin/tool", b"binary")]), &opts) {
+        Err(InstallError::PostInstallSpawnFailed {
+            installed: reported,
+            ..
+        }) => assert_eq!(reported, installed),
+        other => panic!("unexpected result: {other:?}"),
+    }
+    assert_eq!(std::fs::read(installed).unwrap(), b"binary");
 }
 
 #[cfg(not(unix))]
@@ -437,10 +736,67 @@ mod archive_script {
         let archive = tar_with_script("#!/bin/sh\nexit 3\n");
         let dir = tempfile::tempdir().unwrap();
         let opts = options_with_script(dir.path(), &archive, "scripts/install.sh", vec![]);
-        assert!(matches!(
-            install_reader(Cursor::new(&archive), &opts),
-            Err(InstallError::ScriptFailed(_))
-        ));
-        assert_eq!(std::fs::read(dir.path().join("tool")).unwrap(), b"binary");
+        let installed = dir.path().join("tool");
+        match install_reader(Cursor::new(&archive), &opts) {
+            Err(InstallError::ScriptFailed {
+                installed: reported,
+                ..
+            }) => assert_eq!(reported, installed),
+            other => panic!("unexpected result: {other:?}"),
+        }
+        assert_eq!(std::fs::read(installed).unwrap(), b"binary");
+    }
+
+    #[test]
+    fn script_spawn_failure_reports_installed_file() {
+        let archive = tar_with_script("#!/nonexistent/neotales-ospm-missing\nexit 0\n");
+        let dir = tempfile::tempdir().unwrap();
+        let opts = options_with_script(dir.path(), &archive, "scripts/install.sh", vec![]);
+        let installed = dir.path().join("tool");
+        match install_reader(Cursor::new(&archive), &opts) {
+            Err(InstallError::ScriptSpawnFailed {
+                installed: reported,
+                ..
+            }) => assert_eq!(reported, installed),
+            other => panic!("unexpected result: {other:?}"),
+        }
+        assert_eq!(std::fs::read(installed).unwrap(), b"binary");
+    }
+
+    #[test]
+    fn scan_limit_is_shared_across_script_and_executable_scans() {
+        let archive = tar_with_script("#!/bin/sh\nexit 0\n");
+        let dir = tempfile::tempdir().unwrap();
+        let mut opts = options_with_script(dir.path(), &archive, "scripts/install.sh", vec![]);
+        opts.max_scan_bytes = archive.len() as u64 * 3 / 2;
+        let result = install_reader(Cursor::new(&archive), &opts);
+        assert!(
+            matches!(result, Err(InstallError::ScanLimit)),
+            "unexpected: {result:?}"
+        );
+        assert!(!dir.path().join("tool").exists());
+    }
+
+    #[test]
+    fn script_selector_with_embedded_exe_is_not_rewritten() {
+        let archive = tar_bytes(&[
+            ("bin/tool", b"binary"),
+            (
+                "scripts/install.exe.sh",
+                b"#!/bin/sh\nprintf ran > \"$1\"\n",
+            ),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let marker = output.path().join("marker");
+        let mut opts = options(dir.path(), Format::Tar);
+        opts.grep = Selector::Glob("bin/tool".into());
+        opts.sha256 = digest(&archive);
+        opts.archive_script = Some(ArchiveScript {
+            selector: Selector::Regex(r"^scripts/install\.exe\.sh$".into()),
+            args: vec![marker.clone().into_os_string()],
+        });
+        install_reader(Cursor::new(&archive), &opts).unwrap();
+        assert_eq!(std::fs::read(marker).unwrap(), b"ran");
     }
 }

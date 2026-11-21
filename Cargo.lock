@@ -824,6 +824,9 @@ dependencies = [
  "regex",
  "serde",
  "serde-saphyr",
+ "sha2",
+ "tar",
+ "tempfile",
 ]
 
 [[package]]
