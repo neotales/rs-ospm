@@ -846,6 +846,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "neotales-ospm-cargo-cli"
+version = "0.0.0-alpha.0"
+dependencies = [
+ "neotales-ospm-core",
+]
+
+[[package]]
 name = "neotales-ospm-core"
 version = "0.0.0-alpha.0"
 

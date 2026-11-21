@@ -1,0 +1,16 @@
+[package]
+name = "neotales-ospm-cargo-cli"
+description = "Explicit process backend for Cargo executable installation"
+version = "0.0.0-alpha.0"
+edition = "2024"
+rust-version = "1.100"
+license = "MIT"
+authors = ["x0craft"]
+repository = "https://github.com/neotales/rs-ospm"
+readme = "README.md"
+
+[dependencies]
+neotales-ospm-core = { path = "../core", version = "0.0.0-alpha.0" }
+
+[lints]
+workspace = true

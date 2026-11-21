@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["core", "apt", "apt-cli", "apt-shim", "pacman", "pacman-cli", "pacman-shim", "archive", "release", "github", "gitlab", "aqua", "go-tool"]
+members = ["core", "apt", "apt-cli", "apt-shim", "pacman", "pacman-cli", "pacman-shim", "archive", "release", "github", "gitlab", "aqua", "go-tool", "cargo-tool"]
 
 [workspace.lints.rust]
 missing_docs = "warn"
