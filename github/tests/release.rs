@@ -42,6 +42,46 @@ fn parses_and_selects_asset_from_release_response() {
     assert_eq!(asset.digest.as_deref(), Some("sha256:abc"));
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn live_verified_archive_install_when_configured() {
+    if std::env::var_os("NEOTALES_OSPM_TEST_GITHUB_DOWNLOAD").is_none() {
+        return;
+    }
+    use neotales_ospm_archive::{Format, InstallOptions, Selector};
+    let release = Github::new()
+        .unwrap()
+        .release("BurntSushi", "ripgrep", None)
+        .unwrap();
+    let asset = release
+        .assets
+        .iter()
+        .find(|a| a.name.ends_with("-x86_64-unknown-linux-musl.tar.gz"))
+        .expect("release must provide the Linux musl archive");
+    // Provider metadata is used only as a smoke-test fixture, not as an
+    // independent trust source for real installations.
+    let digest = asset
+        .digest
+        .as_deref()
+        .and_then(|d| d.strip_prefix("sha256:"))
+        .expect("the selected smoke-test asset must have a SHA-256 digest");
+    let dir = tempfile::tempdir().unwrap();
+    let options = InstallOptions::new(
+        Format::TarGz,
+        Selector::Regex("(^|/)rg$".into()),
+        dir.path(),
+        digest,
+    );
+    let selected = AssetOptions {
+        template: Some(asset.name.clone()),
+        ..Default::default()
+    };
+    let path = release
+        .install(&linux_target(), &selected, &options)
+        .unwrap();
+    assert_eq!(&std::fs::read(path).unwrap()[..4], b"\x7fELF");
+}
+
 #[test]
 fn ignores_unknown_fields_and_accepts_an_empty_asset_list() {
     let release: Release = serde_json::from_str(
