@@ -32,7 +32,15 @@ Apt::new().install(&package)?;
 ```
 
 `apt-get` may require elevated privileges and confirmation. The crate does not
-elevate privileges. Native APT API or FFI support is not implemented yet.
+elevate privileges. The separate `neotales-ospm-apt` crate provides native APT
+queries.
+
+The `List` capability returns installed versions from `dpkg-query`. `Search`
+uses APT's regular-expression search syntax and returns the versions selected by
+`apt-cache --no-all-versions show`, with architecture and description when
+available. `Update` upgrades a named package, and `UpdateSources` refreshes
+repository metadata. Holds and local `.deb` installation are supported;
+source add and remove are not. No command runs through a shell.
 
 ## Licence
 

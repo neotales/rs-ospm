@@ -12,13 +12,19 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Output, Stdio};
 
-use neotales_ospm_core::{Install, PackageName, Remove};
+use neotales_ospm_core::{
+    Install, InstallFile, List, Package, PackageName, Pin, Remove, Search, Update, UpdateSources,
+};
 
 /// Failure while invoking the APT command-line fallback.
 #[derive(Debug)]
 pub enum PackageError {
     /// The process could not be started or read.
     Io(std::io::Error),
+    /// The supplied search query cannot be passed to APT.
+    InvalidQuery,
+    /// The manager's output was not valid UTF-8 or did not match the expected format.
+    InvalidOutput,
     /// The command returned an unsuccessful status.
     CommandFailed {
         /// The process exit status.
@@ -32,6 +38,8 @@ impl fmt::Display for PackageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(error) => write!(f, "package manager process: {error}"),
+            Self::InvalidQuery => f.write_str("invalid empty or NUL-containing search query"),
+            Self::InvalidOutput => f.write_str("invalid package manager output"),
             Self::CommandFailed { status, stderr } => write!(
                 f,
                 "package manager exited with {status}: {}",
@@ -45,7 +53,7 @@ impl Error for PackageError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
-            Self::CommandFailed { .. } => None,
+            Self::CommandFailed { .. } | Self::InvalidQuery | Self::InvalidOutput => None,
         }
     }
 }
@@ -54,6 +62,9 @@ impl Error for PackageError {
 #[derive(Clone, Debug)]
 pub struct Apt {
     executable: PathBuf,
+    apt_cache: PathBuf,
+    dpkg_query: PathBuf,
+    apt_mark: PathBuf,
 }
 
 impl Default for Apt {
@@ -72,7 +83,23 @@ impl Apt {
     pub fn with_executable(executable: impl Into<PathBuf>) -> Self {
         Self {
             executable: executable.into(),
+            apt_cache: "apt-cache".into(),
+            dpkg_query: "dpkg-query".into(),
+            apt_mark: "apt-mark".into(),
         }
+    }
+
+    /// Overrides the executables used for read-only queries and holds.
+    pub fn with_tools(
+        mut self,
+        apt_cache: impl Into<PathBuf>,
+        dpkg_query: impl Into<PathBuf>,
+        apt_mark: impl Into<PathBuf>,
+    ) -> Self {
+        self.apt_cache = apt_cache.into();
+        self.dpkg_query = dpkg_query.into();
+        self.apt_mark = apt_mark.into();
+        self
     }
 
     /// The configured executable; a relative path is resolved when spawned.
@@ -114,6 +141,16 @@ impl Apt {
             .map_err(PackageError::Io)?;
         check(output)
     }
+
+    fn interactive(&self, command: &mut Command) -> Result<(), PackageError> {
+        check(
+            command
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .output()
+                .map_err(PackageError::Io)?,
+        )
+    }
 }
 
 fn check(output: Output) -> Result<(), PackageError> {
@@ -141,4 +178,145 @@ impl Remove for Apt {
     fn remove(&self, package: &PackageName) -> Result<(), PackageError> {
         self.run("remove", package)
     }
+}
+
+impl Update for Apt {
+    type Error = PackageError;
+    fn update(&self, package: &PackageName) -> Result<(), Self::Error> {
+        self.interactive(
+            self.command()
+                .args(["install", "--only-upgrade", "--", package.as_str()]),
+        )
+    }
+}
+
+impl UpdateSources for Apt {
+    type Error = PackageError;
+    fn update_sources(&self) -> Result<(), Self::Error> {
+        self.interactive(self.command().arg("update"))
+    }
+}
+
+impl Pin for Apt {
+    type Error = PackageError;
+    fn pin(&self, package: &PackageName) -> Result<(), Self::Error> {
+        self.interactive(Command::new(&self.apt_mark).args(["hold", "--", package.as_str()]))
+    }
+    fn unpin(&self, package: &PackageName) -> Result<(), Self::Error> {
+        self.interactive(Command::new(&self.apt_mark).args(["unhold", "--", package.as_str()]))
+    }
+}
+
+impl InstallFile for Apt {
+    type Error = PackageError;
+    fn install_file(&self, path: &Path) -> Result<(), Self::Error> {
+        let absolute = std::fs::canonicalize(path).map_err(PackageError::Io)?;
+        self.interactive(self.command().args(["install", "--"]).arg(absolute))
+    }
+}
+
+fn text_output(command: &mut Command) -> Result<String, PackageError> {
+    let output = command
+        .env("LC_ALL", "C")
+        .output()
+        .map_err(PackageError::Io)?;
+    if !output.status.success() {
+        return Err(PackageError::CommandFailed {
+            status: output.status,
+            stderr: output.stderr,
+        });
+    }
+    String::from_utf8(output.stdout).map_err(|_| PackageError::InvalidOutput)
+}
+
+impl List for Apt {
+    type Error = PackageError;
+    fn list(&self) -> Result<Vec<Package>, Self::Error> {
+        let output = text_output(Command::new(&self.dpkg_query).args([
+            "--show",
+            "--showformat=${binary:Package}\\t${Version}\\t${db:Status-Status}\\n",
+        ]))?;
+        let mut packages = Vec::new();
+        for line in output.lines() {
+            let mut fields = line.split('\t');
+            let (Some(name), Some(version), Some(status), None) =
+                (fields.next(), fields.next(), fields.next(), fields.next())
+            else {
+                return Err(PackageError::InvalidOutput);
+            };
+            if status == "installed" {
+                if name.is_empty() || version.is_empty() {
+                    return Err(PackageError::InvalidOutput);
+                }
+                packages.push(Package {
+                    name: name.into(),
+                    version: version.into(),
+                    metadata: Default::default(),
+                });
+            }
+        }
+        Ok(packages)
+    }
+}
+
+impl Search for Apt {
+    type Error = PackageError;
+    fn search(&self, query: &str) -> Result<Vec<Package>, Self::Error> {
+        if query.is_empty() || query.contains('\0') {
+            return Err(PackageError::InvalidQuery);
+        }
+        let output = text_output(Command::new(&self.apt_cache).args(["search", "--", query]))?;
+        let mut names = Vec::new();
+        for line in output.lines() {
+            let (name, _) = line.split_once(" - ").ok_or(PackageError::InvalidOutput)?;
+            let name = PackageName::new(name).map_err(|_| PackageError::InvalidOutput)?;
+            names.push(name);
+        }
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut command = Command::new(&self.apt_cache);
+        command.args(["--no-all-versions", "show", "--"]);
+        command.args(names.iter().map(PackageName::as_str));
+        let details = text_output(&mut command)?;
+        parse_details(&details)
+    }
+}
+
+fn parse_details(details: &str) -> Result<Vec<Package>, PackageError> {
+    let mut result = Vec::new();
+    for record in details
+        .split("\n\n")
+        .filter(|record| !record.trim().is_empty())
+    {
+        let mut name = None;
+        let mut version = None;
+        let mut metadata = std::collections::BTreeMap::new();
+        for line in record.lines() {
+            if line.starts_with([' ', '\t']) {
+                continue;
+            }
+            let (key, value) = line.split_once(": ").ok_or(PackageError::InvalidOutput)?;
+            match key {
+                "Package" => name = Some(value.to_owned()),
+                "Version" => version = Some(value.to_owned()),
+                "Architecture" | "Description" => {
+                    metadata.insert(key.to_ascii_lowercase(), value.to_owned());
+                }
+                _ => {}
+            }
+        }
+        let (Some(name), Some(version)) = (name, version) else {
+            return Err(PackageError::InvalidOutput);
+        };
+        if name.is_empty() || version.is_empty() {
+            return Err(PackageError::InvalidOutput);
+        }
+        result.push(Package {
+            name,
+            version,
+            metadata,
+        });
+    }
+    Ok(result)
 }

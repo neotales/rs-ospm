@@ -10,7 +10,9 @@ Rust crates for operating system package managers.
 | [`neotales-ospm-apt-cli`](apt-cli/) | Explicit process-based APT backend |
 
 The native implementation currently supports installed-status queries only.
-The process backend supports install and remove. There is no automatic fallback.
+The process backend supports install, remove, update, list, search, source
+refresh, package holds and local package files. Source add and remove are not
+implemented. There is no automatic fallback.
 
 The shim depends on GPL-2.0-or-later `libapt-pkg`. The MIT and LGPL licences
 of our code do not change the obligations of distributing the combined software.

@@ -6,8 +6,32 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
+use std::path::Path;
+
+/// A package and version in the target manager's namespace.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Package {
+    /// Manager-specific package name, including any architecture qualifier.
+    pub name: String,
+    /// Version as reported by the manager, without cross-manager comparison.
+    pub version: String,
+    /// Optional manager-specific fields. Keys and values are backend-defined.
+    pub metadata: BTreeMap<String, String>,
+}
+
+/// A package source in the target manager's namespace.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Source {
+    /// Manager-specific identifier used to select the source.
+    pub id: String,
+    /// Manager-specific source definition or location.
+    pub location: String,
+    /// Optional manager-specific fields.
+    pub metadata: BTreeMap<String, String>,
+}
 
 /// A package identifier in the target manager's own namespace.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -74,4 +98,67 @@ pub trait IsInstalled {
 
     /// Checks the manager's package database.
     fn is_installed(&self, package: &PackageName) -> Result<bool, Self::Error>;
+}
+
+/// Upgrades one installed package to the manager's selected version.
+pub trait Update {
+    /// Backend-specific error.
+    type Error: Error + Send + Sync + 'static;
+    /// Upgrade the specified package, without updating source metadata.
+    fn update(&self, package: &PackageName) -> Result<(), Self::Error>;
+}
+
+/// Lists installed packages.
+pub trait List {
+    /// Backend-specific error.
+    type Error: Error + Send + Sync + 'static;
+    /// Return installed packages with the installed version.
+    fn list(&self) -> Result<Vec<Package>, Self::Error>;
+}
+
+/// Searches available packages.
+pub trait Search {
+    /// Backend-specific error.
+    type Error: Error + Send + Sync + 'static;
+    /// Search using the backend's query syntax. Versions are manager-selected
+    /// or explicitly documented by the backend.
+    fn search(&self, query: &str) -> Result<Vec<Package>, Self::Error>;
+}
+
+/// Optional source management capability.
+pub trait Sources {
+    /// Backend-specific error.
+    type Error: Error + Send + Sync + 'static;
+    /// List configured sources.
+    fn list_sources(&self) -> Result<Vec<Source>, Self::Error>;
+    /// Add the manager-specific source definition.
+    fn add_source(&self, source: &Source) -> Result<(), Self::Error>;
+    /// Remove a source selected by its manager-specific identifier.
+    fn remove_source(&self, id: &str) -> Result<(), Self::Error>;
+}
+
+/// Optional capability to refresh source metadata, distinct from package upgrades.
+pub trait UpdateSources {
+    /// Backend-specific error.
+    type Error: Error + Send + Sync + 'static;
+    /// Refresh configured sources.
+    fn update_sources(&self) -> Result<(), Self::Error>;
+}
+
+/// Optional capability to prevent or resume automatic package upgrades.
+pub trait Pin {
+    /// Backend-specific error.
+    type Error: Error + Send + Sync + 'static;
+    /// Hold the installed package at its current version.
+    fn pin(&self, package: &PackageName) -> Result<(), Self::Error>;
+    /// Remove the hold.
+    fn unpin(&self, package: &PackageName) -> Result<(), Self::Error>;
+}
+
+/// Optional capability to install a local package file.
+pub trait InstallFile {
+    /// Backend-specific error.
+    type Error: Error + Send + Sync + 'static;
+    /// Install the package file, leaving dependency handling to the manager.
+    fn install_file(&self, path: &Path) -> Result<(), Self::Error>;
 }
