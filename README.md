@@ -16,6 +16,7 @@ Rust crates for operating system package managers.
 | [`neotales-ospm-github`](github/) | GitHub releases and verified asset installation |
 | [`neotales-ospm-gitlab`](gitlab/) | GitLab releases and verified asset installation |
 | [`neotales-ospm-aqua`](aqua/) | Strict subset of Aqua GitHub release recipes |
+| [`neotales-ospm-go-cli`](go-tool/) | Install explicitly versioned Go commands |
 
 The native implementation currently supports installed-status queries only.
 The process backend supports install, remove, update, list, search, source
