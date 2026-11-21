@@ -1,0 +1,17 @@
+[package]
+name = "neotales-ospm-pacman"
+description = "MIT client for the libalpm C ABI shim"
+version = "0.0.0-alpha.0"
+edition = "2024"
+rust-version = "1.100"
+license = "MIT"
+authors = ["x0craft"]
+repository = "https://github.com/neotales/rs-ospm"
+readme = "README.md"
+
+[dependencies]
+libloading = "0.8"
+neotales-ospm-core = { path = "../core", version = "0.0.0-alpha.0" }
+
+[lints]
+workspace = true

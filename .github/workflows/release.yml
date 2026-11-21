@@ -28,7 +28,7 @@ jobs:
           python3 - <<'PY'
           import os, tomllib
           versions = []
-          for path in ("core/Cargo.toml", "apt/Cargo.toml", "apt-cli/Cargo.toml", "apt-shim/Cargo.toml"):
+          for path in ("core/Cargo.toml", "apt/Cargo.toml", "apt-cli/Cargo.toml", "apt-shim/Cargo.toml", "pacman/Cargo.toml", "pacman-cli/Cargo.toml", "pacman-shim/Cargo.toml"):
               with open(path, "rb") as f:
                   versions.append(tomllib.load(f)["package"]["version"])
           if len(set(versions)) != 1 or os.environ["TAG"] != "v" + versions[0]:
@@ -90,3 +90,6 @@ jobs:
           publish_crate neotales-ospm-apt-shim
           publish_crate neotales-ospm-apt
           publish_crate neotales-ospm-apt-cli
+          publish_crate neotales-ospm-pacman-shim
+          publish_crate neotales-ospm-pacman
+          publish_crate neotales-ospm-pacman-cli

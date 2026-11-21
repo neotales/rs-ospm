@@ -84,6 +84,29 @@ name = "neotales-ospm-core"
 version = "0.0.0-alpha.0"
 
 [[package]]
+name = "neotales-ospm-pacman"
+version = "0.0.0-alpha.0"
+dependencies = [
+ "libloading",
+ "neotales-ospm-core",
+]
+
+[[package]]
+name = "neotales-ospm-pacman-cli"
+version = "0.0.0-alpha.0"
+dependencies = [
+ "neotales-ospm-core",
+]
+
+[[package]]
+name = "neotales-ospm-pacman-shim"
+version = "0.0.0-alpha.0"
+dependencies = [
+ "libloading",
+ "neotales-ospm-core",
+]
+
+[[package]]
 name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
