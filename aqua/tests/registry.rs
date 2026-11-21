@@ -87,4 +87,67 @@ packages:
         .plan(&target, "v1", Path::new("/tmp"), &"a".repeat(64))
         .unwrap();
     assert_eq!(plan.asset, "app_linux_amd64.tar.gz");
+    assert!(
+        matches!(&plan.install.grep, neotales_ospm_archive::Selector::Regex(pattern) if pattern == "^app$")
+    );
+}
+
+#[test]
+fn supported_envs_and_first_matching_override() {
+    let yaml = r#"
+packages:
+  - type: github_release
+    repo_owner: org
+    repo_name: app
+    asset: "app-{{.OS}}-{{.Arch}}.tar.gz"
+    format: tar.gz
+    supported_envs: [linux/amd64, windows]
+    files:
+      - name: app
+    overrides:
+      - envs: [linux/amd64]
+        asset: first-linux-amd64.tar.gz
+      - goos: linux
+        asset: second-linux-amd64.tar.gz
+"#;
+    let registry = Registry::parse(yaml).unwrap();
+    let recipe = registry.package("org/app").unwrap();
+    let linux = Target {
+        os: "linux".into(),
+        arch: "x86_64".into(),
+    };
+    let plan = recipe
+        .plan(&linux, "v1", Path::new("/tmp"), &"a".repeat(64))
+        .unwrap();
+    assert_eq!(plan.asset, "first-linux-amd64.tar.gz");
+    let mac = Target {
+        os: "macos".into(),
+        arch: "aarch64".into(),
+    };
+    assert!(matches!(
+        recipe.plan(&mac, "v1", Path::new("/tmp"), &"a".repeat(64)),
+        Err(Error::Unsupported(_))
+    ));
+}
+
+#[test]
+fn empty_supported_envs_rejects_every_target() {
+    let yaml = REGISTRY.replace(
+        "    format: tar.gz",
+        "    supported_envs: []\n    format: tar.gz",
+    );
+    let registry = Registry::parse(&yaml).unwrap();
+    let target = Target {
+        os: "linux".into(),
+        arch: "x86_64".into(),
+    };
+    assert!(matches!(
+        registry.package("org/app").unwrap().plan(
+            &target,
+            "v1",
+            Path::new("/tmp"),
+            &"a".repeat(64)
+        ),
+        Err(Error::Unsupported(_))
+    ));
 }

@@ -45,7 +45,8 @@ assert_eq!(plan.asset, "tool-linux-amd64.tar.gz");
 ```
 
 Only `github_release` recipes with one file and simple templates and platform
-overrides are supported. Unsupported fields, including checksum and version
+overrides are supported. `supported_envs` is enforced, and the first matching
+platform override is used. Unsupported fields, including checksum and version
 constraints, are rejected rather than ignored. The caller must verify registry
 authenticity and supply a trusted checksum.
 

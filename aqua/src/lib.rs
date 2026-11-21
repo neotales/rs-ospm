@@ -37,6 +37,8 @@ pub struct Recipe {
     #[serde(default)]
     overrides: Vec<Override>,
     #[serde(default)]
+    supported_envs: Option<Vec<String>>,
+    #[serde(default)]
     files: Vec<RecipeFile>,
 }
 
@@ -45,6 +47,7 @@ pub struct Recipe {
 struct Override {
     goos: Option<String>,
     goarch: Option<String>,
+    envs: Option<Vec<String>>,
     asset: Option<String>,
     format: Option<String>,
     replacements: Option<BTreeMap<String, String>>,
@@ -141,6 +144,35 @@ fn render(input: &str, os: &str, arch: &str, version: &str, format: &str) -> Res
     Ok(output)
 }
 
+fn env_matches(env: &str, os: &str, arch: &str) -> Result<bool, Error> {
+    if env == "all" {
+        return Ok(true);
+    }
+    let known_os = ["linux", "darwin", "windows", "freebsd", "openbsd", "netbsd"];
+    let known_arch = ["amd64", "arm64", "386", "arm"];
+    if known_os.contains(&env) {
+        return Ok(env == os);
+    }
+    if known_arch.contains(&env) {
+        return Ok(env == arch);
+    }
+    if let Some((candidate_os, candidate_arch)) = env.split_once('/')
+        && known_os.contains(&candidate_os)
+        && known_arch.contains(&candidate_arch)
+    {
+        return Ok(candidate_os == os && candidate_arch == arch);
+    }
+    Err(Error::Unsupported("environment selector"))
+}
+
+fn any_env_matches(envs: &[String], os: &str, arch: &str) -> Result<bool, Error> {
+    let mut matched = false;
+    for env in envs {
+        matched |= env_matches(env, os, arch)?;
+    }
+    Ok(matched)
+}
+
 impl Recipe {
     /// Resolve the supported recipe subset for a target and exact release tag.
     ///
@@ -168,18 +200,28 @@ impl Recipe {
             "arm" => "arm",
             _ => return Err(Error::Unsupported("architecture")),
         };
-        let applicable: Vec<_> = self
-            .overrides
-            .iter()
-            .filter(|o| {
-                o.goos.as_deref().is_none_or(|v| v == os)
-                    && o.goarch.as_deref().is_none_or(|v| v == arch)
-            })
-            .collect();
-        if applicable.len() > 1 {
-            return Err(Error::Unsupported("overlapping platform overrides"));
+        if let Some(envs) = &self.supported_envs
+            && !any_env_matches(envs, os, arch)?
+        {
+            return Err(Error::Unsupported("target is not in supported_envs"));
         }
-        let selected = applicable.first().copied();
+        let mut selected = None;
+        for override_ in &self.overrides {
+            if override_.goos.is_none() && override_.goarch.is_none() && override_.envs.is_none() {
+                return Err(Error::Unsupported("override has no platform selector"));
+            }
+            let env_matches = match &override_.envs {
+                Some(envs) => any_env_matches(envs, os, arch)?,
+                None => true,
+            };
+            if override_.goos.as_deref().is_none_or(|v| v == os)
+                && override_.goarch.as_deref().is_none_or(|v| v == arch)
+                && env_matches
+            {
+                selected = Some(override_);
+                break;
+            }
+        }
         let mut replacements = self.replacements.clone();
         if let Some(extra) = selected.and_then(|o| o.replacements.as_ref()) {
             replacements.extend(extra.clone());
@@ -217,11 +259,8 @@ impl Recipe {
             version,
             format,
         )?;
-        let pattern = if file.src.is_some() {
-            format!("^{}$", regex::escape(&source))
-        } else {
-            format!("(^|/){}$", regex::escape(&source))
-        };
+        // The default src is the name at the archive root, not any basename.
+        let pattern = format!("^{}$", regex::escape(&source));
         let mut install =
             InstallOptions::new(format_enum, Selector::Regex(pattern), target_dir, sha256);
         install.rename = Some(name);
