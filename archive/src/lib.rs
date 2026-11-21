@@ -819,10 +819,16 @@ fn select_zip(
     max: u64,
 ) -> Result<String, InstallError> {
     let mut archive = zip::ZipArchive::new(file)?;
+    // zip indexes entries by name, so duplicate central-directory entries would
+    // otherwise be hidden from the exactly-one-match check below.
+    if archive.has_duplicate_names() {
+        return Err(InstallError::Invalid("duplicate ZIP member names"));
+    }
     let mut selected = None;
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index)?;
-        if entry.is_dir() || !matcher.matches(entry.name()) {
+        let name = entry.name()?;
+        if entry.is_dir() || !matcher.matches(&name) {
             continue;
         }
         if entry
@@ -836,7 +842,7 @@ fn select_zip(
         if selected.is_some() {
             return Err(InstallError::MultipleMatches);
         }
-        selected = Some(basename(entry.name())?);
+        selected = Some(basename(&name)?);
         copy_bounded(&mut entry, dest, max)?;
     }
     selected.ok_or(InstallError::NoMatch)

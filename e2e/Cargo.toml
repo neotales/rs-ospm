@@ -1,0 +1,28 @@
+[package]
+name = "neotales-ospm-e2e"
+description = "Containerised integration tests for the OSPM APT command-line backend"
+version = "0.0.0"
+# Not a shippable crate: this package exists only to run integration tests.
+# `publish = false` keeps `cargo publish -p neotales-ospm-e2e` and the release
+# workflow's explicit publish list from treating it as a crate.
+publish = false
+edition = "2024"
+rust-version = "1.100"
+license = "MIT"
+authors = ["x0craft"]
+repository = "https://github.com/neotales/rs-ospm"
+readme = "README.md"
+
+# Container support is reached through POSIX shell wrappers, and the test file
+# is `#![cfg(unix)]`. Target-gating the dependencies keeps the Windows CI lane
+# from compiling testcontainers for an empty test binary. The root Cargo.lock
+# still resolves and pins these crates for every platform.
+[target.'cfg(unix)'.dev-dependencies]
+neotales-ospm-apt-cli = { path = "../apt-cli", version = "0.0.0-alpha.0", features = ["cli"] }
+neotales-ospm-core = { path = "../core", version = "0.0.0-alpha.0" }
+# Pinned exactly: a container test harness must not drift with a semver update.
+testcontainers = { version = "=0.28.0", features = ["blocking"] }
+tempfile = "3.27"
+
+[lints]
+workspace = true

@@ -76,7 +76,7 @@ jobs:
       # `cargo audit` reads no config file. An advisory ignore lives in
       # deny.toml with its reason and delete condition, and has to be repeated
       # here as `--ignore RUSTSEC-XXXX-YYYY` for a crate that has one. This
-      # template has none, so the command takes no flag. Do not add one to make
-      # a red build green.
+      # RUSTSEC-2026-0440 is an unmaintained test-only testcontainers dependency;
+      # remove the exception when upstream replaces it. See deny.toml.
       - name: Check the lockfile against the advisory database
-        run: cargo audit
+        run: cargo audit --ignore RUSTSEC-2026-0440

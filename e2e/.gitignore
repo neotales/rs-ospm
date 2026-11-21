@@ -1,0 +1,4 @@
+# This test-only package is a root workspace member, so the committed
+# repository Cargo.lock pins its transitive dependencies. Only the build
+# directory is local to this directory.
+/target

@@ -122,6 +122,34 @@ fn zip_rename_regex_and_no_overwrite() {
 }
 
 #[test]
+fn rejects_zip_duplicate_names_before_install() {
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    for (name, bytes) in [("bin/tool", &b"first"[..]), ("bin/toom", &b"second"[..])] {
+        zip.start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(bytes).unwrap();
+    }
+    let mut zip = zip.finish().unwrap().into_inner();
+    // ZipWriter rejects duplicate names, so alter both headers after writing.
+    let mut replacements = 0;
+    for offset in 0..zip.len() - b"bin/toom".len() {
+        if &zip[offset..offset + 8] == b"bin/toom" {
+            zip[offset + 7] = b'l';
+            replacements += 1;
+        }
+    }
+    assert_eq!(replacements, 2);
+    assert!(
+        zip::ZipArchive::new(Cursor::new(&zip))
+            .unwrap()
+            .has_duplicate_names()
+    );
+    let dir = tempfile::tempdir().unwrap();
+    assert!(install(&zip, &options(dir.path(), Format::Zip)).is_err());
+    assert!(!dir.path().join("tool").exists());
+}
+
+#[test]
 fn rejects_ambiguous_matches_and_oversized_files() {
     let tar = tar_bytes(&[("a/tool", b"a"), ("b/tool", b"b")]);
     let dir = tempfile::tempdir().unwrap();

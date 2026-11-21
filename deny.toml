@@ -25,7 +25,10 @@ all-features = true
 version = 2
 yanked = "deny"
 unmaintained = "transitive"
-ignore = []
+# Testcontainers 0.28 requires this unmaintained crate for its Docker test
+# harness. It is a test-only dependency; the e2e test uses a pinned trusted
+# image. Remove this exception when testcontainers replaces the dependency.
+ignore = [{ id = "RUSTSEC-2026-0440", reason = "test-only testcontainers dependency; remove when upstream replaces it" }]
 
 [licenses]
 allow = [

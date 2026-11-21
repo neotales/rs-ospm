@@ -52,6 +52,15 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-targets --all-features
 
+      # Docker is present on GitHub's Linux runners. The test itself fails
+      # when NEOTALES_OSPM_E2E=1 is set and the daemon is unreachable, so a
+      # runner without Docker is a red build rather than a silent skip.
+      - name: Test APT container backend
+        if: runner.os == 'Linux'
+        env:
+          NEOTALES_OSPM_E2E: "1"
+        run: cargo test -p neotales-ospm-e2e --locked
+
       - name: Test read-only APT operations
         if: runner.os == 'Linux'
         env:
