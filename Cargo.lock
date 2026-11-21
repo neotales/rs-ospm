@@ -1517,6 +1517,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "neotales-ospm-pnpm-cli"
+version = "0.0.0-alpha.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "neotales-ospm-release"
 version = "0.0.0-alpha.0"
 

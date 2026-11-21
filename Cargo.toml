@@ -2,7 +2,7 @@
 resolver = "3"
 # `e2e` is test-only and `publish = false`. It is a member so the committed
 # root Cargo.lock pins testcontainers and its transitive dependencies.
-members = ["core", "apt", "apt-cli", "apt-shim", "pacman", "pacman-cli", "pacman-shim", "archive", "release", "github", "gitlab", "aqua", "go-tool", "cargo-tool", "e2e"]
+members = ["core", "apt", "apt-cli", "apt-shim", "pacman", "pacman-cli", "pacman-shim", "archive", "release", "github", "gitlab", "aqua", "go-tool", "cargo-tool", "pnpm", "e2e"]
 
 [workspace.lints.rust]
 missing_docs = "warn"

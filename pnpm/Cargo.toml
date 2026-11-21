@@ -1,0 +1,17 @@
+[package]
+name = "neotales-ospm-pnpm-cli"
+description = "Explicit process backend for pnpm global tools and project dependencies"
+version = "0.0.0-alpha.0"
+edition = "2024"
+rust-version = "1.100"
+license = "MIT"
+authors = ["x0craft"]
+repository = "https://github.com/neotales/rs-ospm"
+readme = "README.md"
+categories = ["os"]
+
+[dependencies]
+serde_json = "1.0"
+
+[lints]
+workspace = true
