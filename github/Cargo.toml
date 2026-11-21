@@ -1,0 +1,22 @@
+[package]
+name = "neotales-ospm-github"
+description = "GitHub release asset provider"
+version = "0.0.0-alpha.0"
+edition = "2024"
+rust-version = "1.100"
+license = "MIT"
+authors = ["x0craft"]
+repository = "https://github.com/neotales/rs-ospm"
+readme = "README.md"
+
+[dependencies]
+neotales-ospm-archive = { path = "../archive", version = "0.0.0-alpha.0" }
+neotales-ospm-release = { path = "../release", version = "0.0.0-alpha.0" }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
+
+[lints]
+workspace = true

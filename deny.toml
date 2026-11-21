@@ -32,6 +32,8 @@ allow = [
   "MIT",
   "LGPL-2.1-or-later",
   "Apache-2.0",
+  # Trust-anchor data used by rustls/webpki-roots.
+  "CDLA-Permissive-2.0",
   "BSD-3-Clause",
   "ISC",
   "Unicode-3.0",

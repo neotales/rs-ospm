@@ -1,0 +1,25 @@
+[package]
+name = "neotales-ospm-archive"
+description = "Verified archive downloads and executable installation"
+version = "0.0.0-alpha.0"
+edition = "2024"
+rust-version = "1.100"
+license = "MIT"
+authors = ["x0craft"]
+repository = "https://github.com/neotales/rs-ospm"
+readme = "README.md"
+
+[dependencies]
+bzip2 = "0.5"
+flate2 = "1"
+globset = "0.4"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+sha2 = "0.10"
+tar = "0.4"
+tempfile = "3"
+xz2 = "0.1"
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
+
+[lints]
+workspace = true
