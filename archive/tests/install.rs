@@ -170,3 +170,277 @@ fn failing_explicit_command_keeps_installed_file() {
     ));
     assert_eq!(std::fs::read(dir.path().join("tool")).unwrap(), b"binary");
 }
+
+#[cfg(not(unix))]
+#[test]
+fn archive_scripts_are_rejected_before_install() {
+    use neotales_ospm_archive::ArchiveScript;
+    let archive = tar_bytes(&[("bin/tool", b"binary"), ("scripts/install", b"script")]);
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = options(dir.path(), Format::Tar);
+    opts.sha256 = format!("{:x}", Sha256::digest(&archive));
+    opts.archive_script = Some(ArchiveScript::new(Selector::Glob("scripts/install".into())));
+    assert!(matches!(
+        install_reader(Cursor::new(&archive), &opts),
+        Err(InstallError::Invalid(_))
+    ));
+    assert!(!dir.path().join("tool").exists());
+}
+
+#[cfg(unix)]
+mod archive_script {
+    use std::ffi::OsString;
+    use std::path::Path;
+
+    use neotales_ospm_archive::ArchiveScript;
+
+    use super::*;
+
+    fn digest(bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
+    }
+
+    fn tar_with_script(script: &str) -> Vec<u8> {
+        tar_bytes(&[
+            ("bin/tool", b"binary"),
+            ("scripts/install.sh", script.as_bytes()),
+        ])
+    }
+
+    fn options_with_script(
+        dir: &Path,
+        archive: &[u8],
+        selector: &str,
+        args: Vec<OsString>,
+    ) -> InstallOptions {
+        let mut opts = options(dir, Format::Tar);
+        opts.grep = Selector::Glob("bin/tool".into());
+        opts.sha256 = digest(archive);
+        opts.archive_script = Some(ArchiveScript {
+            selector: Selector::Glob(selector.into()),
+            args,
+        });
+        opts
+    }
+
+    #[test]
+    fn archive_script_is_opt_in() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(options(dir.path(), Format::Tar).archive_script.is_none());
+    }
+
+    #[test]
+    fn runs_explicit_archive_script_after_verified_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let marker = output.path().join("marker");
+        let cwd_file = output.path().join("cwd");
+        let archive = tar_with_script("#!/bin/sh\nprintf ran > \"$1\"\npwd > \"$2\"\n");
+        let opts = options_with_script(
+            dir.path(),
+            &archive,
+            "scripts/install.sh",
+            vec![
+                marker.clone().into_os_string(),
+                cwd_file.clone().into_os_string(),
+            ],
+        );
+        let installed = install_reader(Cursor::new(&archive), &opts).unwrap();
+        assert_eq!(std::fs::read(installed).unwrap(), b"binary");
+        assert_eq!(std::fs::read(&marker).unwrap(), b"ran");
+        let cwd = std::fs::read_to_string(&cwd_file).unwrap();
+        assert!(
+            !Path::new(cwd.trim()).exists(),
+            "script working directory must be private and removed"
+        );
+    }
+
+    #[test]
+    fn runs_zip_archive_script() {
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        zip.start_file("bin/tool", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"binary").unwrap();
+        zip.start_file(
+            "scripts/install.sh",
+            zip::write::SimpleFileOptions::default().unix_permissions(0o100755),
+        )
+        .unwrap();
+        zip.write_all(b"#!/bin/sh\nprintf ran > \"$1\"\n").unwrap();
+        let archive = zip.finish().unwrap().into_inner();
+        let dir = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let marker = output.path().join("marker");
+        let mut opts = options(dir.path(), Format::Zip);
+        opts.grep = Selector::Glob("bin/tool".into());
+        opts.sha256 = digest(&archive);
+        opts.archive_script = Some(ArchiveScript {
+            selector: Selector::Glob("scripts/install.sh".into()),
+            args: vec![marker.clone().into_os_string()],
+        });
+        let installed = install_reader(Cursor::new(&archive), &opts).unwrap();
+        assert_eq!(std::fs::read(installed).unwrap(), b"binary");
+        assert_eq!(std::fs::read(marker).unwrap(), b"ran");
+    }
+
+    #[test]
+    fn rejects_script_without_verified_digest() {
+        let archive = tar_with_script("#!/bin/sh\nexit 0\n");
+        let dir = tempfile::tempdir().unwrap();
+        let opts = options_with_script(dir.path(), &archive, "scripts/install.sh", vec![]);
+        assert!(matches!(
+            install(&archive, &opts),
+            Err(InstallError::Invalid(_))
+        ));
+        assert!(!dir.path().join("tool").exists());
+    }
+
+    #[test]
+    fn rejects_link_script_before_install() {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut tool = tar::Header::new_gnu();
+        tool.set_size(6);
+        tool.set_mode(0o644);
+        tool.set_cksum();
+        builder
+            .append_data(&mut tool, "bin/tool", &b"binary"[..])
+            .unwrap();
+        let mut link = tar::Header::new_gnu();
+        link.set_size(0);
+        link.set_mode(0o777);
+        link.set_entry_type(tar::EntryType::Symlink);
+        link.set_link_name("/bin/sh").unwrap();
+        link.set_cksum();
+        builder
+            .append_data(&mut link, "scripts/install.sh", Cursor::new([]))
+            .unwrap();
+        let archive = builder.into_inner().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let opts = options_with_script(dir.path(), &archive, "scripts/install.sh", vec![]);
+        assert!(matches!(
+            install_reader(Cursor::new(&archive), &opts),
+            Err(InstallError::Invalid(_))
+        ));
+        assert!(!dir.path().join("tool").exists());
+    }
+
+    #[test]
+    fn rejects_script_path_traversal_before_install() {
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        zip.start_file("bin/tool", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"binary").unwrap();
+        zip.start_file("../install.sh", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"#!/bin/sh\nexit 0\n").unwrap();
+        let archive = zip.finish().unwrap().into_inner();
+        let dir = tempfile::tempdir().unwrap();
+        let mut opts = options(dir.path(), Format::Zip);
+        opts.grep = Selector::Glob("bin/tool".into());
+        opts.sha256 = digest(&archive);
+        opts.archive_script = Some(ArchiveScript::new(Selector::Glob("../install.sh".into())));
+        assert!(matches!(
+            install_reader(Cursor::new(&archive), &opts),
+            Err(InstallError::Invalid(_))
+        ));
+        assert!(!dir.path().join("tool").exists());
+        assert!(!dir.path().parent().unwrap().join("install.sh").exists());
+    }
+
+    #[test]
+    fn rejects_oversized_script_before_install() {
+        let archive = tar_with_script("#!/bin/sh\nprintf longer than the limit\n");
+        let dir = tempfile::tempdir().unwrap();
+        let mut opts = options_with_script(dir.path(), &archive, "scripts/install.sh", vec![]);
+        opts.max_file_bytes = 8;
+        assert!(matches!(
+            install_reader(Cursor::new(&archive), &opts),
+            Err(InstallError::SizeLimit)
+        ));
+        assert!(!dir.path().join("tool").exists());
+    }
+
+    #[test]
+    fn rejects_shebang_less_script_instead_of_running_a_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let marker = output.path().join("marker");
+        let archive = tar_with_script("printf ran > \"$1\"\n");
+        let opts = options_with_script(
+            dir.path(),
+            &archive,
+            "scripts/install.sh",
+            vec![marker.clone().into_os_string()],
+        );
+        assert!(matches!(
+            install_reader(Cursor::new(&archive), &opts),
+            Err(InstallError::Invalid(_))
+        ));
+        assert!(!marker.exists());
+        assert!(!dir.path().join("tool").exists());
+    }
+
+    #[test]
+    fn rejects_bare_shebang_instead_of_running_a_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let marker = output.path().join("marker");
+        let archive = tar_with_script("#!\nprintf ran > \"$1\"\n");
+        let opts = options_with_script(
+            dir.path(),
+            &archive,
+            "scripts/install.sh",
+            vec![marker.clone().into_os_string()],
+        );
+        assert!(matches!(
+            install_reader(Cursor::new(&archive), &opts),
+            Err(InstallError::Invalid(_))
+        ));
+        assert!(!marker.exists());
+        assert!(!dir.path().join("tool").exists());
+    }
+
+    #[test]
+    fn accepts_shebang_with_leading_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let marker = output.path().join("marker");
+        let archive = tar_with_script("#! /bin/sh\nprintf ran > \"$1\"\n");
+        let opts = options_with_script(
+            dir.path(),
+            &archive,
+            "scripts/install.sh",
+            vec![marker.clone().into_os_string()],
+        );
+        install_reader(Cursor::new(&archive), &opts).unwrap();
+        assert_eq!(std::fs::read(marker).unwrap(), b"ran");
+    }
+
+    #[test]
+    fn rejects_ambiguous_scripts_before_install() {
+        let tar = tar_bytes(&[
+            ("bin/tool", b"binary"),
+            ("a/install.sh", b"#!/bin/sh\nexit 0\n"),
+            ("b/install.sh", b"#!/bin/sh\nexit 0\n"),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let opts = options_with_script(dir.path(), &tar, "*/install.sh", vec![]);
+        assert!(matches!(
+            install_reader(Cursor::new(&tar), &opts),
+            Err(InstallError::MultipleMatches)
+        ));
+        assert!(!dir.path().join("tool").exists());
+    }
+
+    #[test]
+    fn failing_script_keeps_installed_file() {
+        let archive = tar_with_script("#!/bin/sh\nexit 3\n");
+        let dir = tempfile::tempdir().unwrap();
+        let opts = options_with_script(dir.path(), &archive, "scripts/install.sh", vec![]);
+        assert!(matches!(
+            install_reader(Cursor::new(&archive), &opts),
+            Err(InstallError::ScriptFailed(_))
+        ));
+        assert_eq!(std::fs::read(dir.path().join("tool")).unwrap(), b"binary");
+    }
+}

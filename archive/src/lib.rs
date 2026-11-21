@@ -57,6 +57,44 @@ pub struct PostInstall {
     pub args: Vec<OsString>,
 }
 
+/// A script that the archive itself provides, selected for explicit execution.
+///
+/// The script runs only as part of a checksum-verified installation
+/// ([`install_https`] or [`install_reader`]); [`install_verified_archive`]
+/// rejects it because that function does not check the archive digest.
+///
+/// Before anything runs, the selected member must be exactly one regular file
+/// (links and special files are rejected), its path must be relative without
+/// `..` components, and its extracted size is bounded by
+/// [`InstallOptions::max_file_bytes`]. The member is validated and staged
+/// before the destination is written; it executes after the executable is
+/// installed and before [`InstallOptions::post_install`]. The script is written
+/// to a private temporary directory and executed directly with
+/// [`std::process::Command`] without an explicit shell wrapper. On Unix
+/// the member must begin with `#!` and name an absolute interpreter, which may
+/// itself be a shell. Platform execution mechanisms can use shell fallbacks.
+/// Archive-script execution is not currently supported on non-Unix platforms.
+/// The script
+/// inherits the caller's environment and privileges and may do anything the
+/// caller can, so only request one from an archive and checksum you trust.
+#[derive(Clone, Debug)]
+pub struct ArchiveScript {
+    /// Glob or regular expression selecting exactly one regular file.
+    pub selector: Selector,
+    /// Arguments passed directly to the script.
+    pub args: Vec<OsString>,
+}
+
+impl ArchiveScript {
+    /// Select an archive-provided script with no arguments.
+    pub fn new(selector: Selector) -> Self {
+        Self {
+            selector,
+            args: Vec::new(),
+        }
+    }
+}
+
 /// Options for one verified archive installation.
 #[derive(Clone, Debug)]
 pub struct InstallOptions {
@@ -76,6 +114,11 @@ pub struct InstallOptions {
     pub max_file_bytes: u64,
     /// Optional command run only after successful installation.
     pub post_install: Option<PostInstall>,
+    /// Optional archive-provided script to extract and execute after
+    /// installation. Absent by default: running an archive script is opt-in.
+    /// It is rejected by [`install_verified_archive`], which does not verify
+    /// the checksum, and runs before `post_install`.
+    pub archive_script: Option<ArchiveScript>,
 }
 
 impl InstallOptions {
@@ -95,6 +138,7 @@ impl InstallOptions {
             max_download_bytes: DEFAULT_DOWNLOAD_LIMIT,
             max_file_bytes: DEFAULT_FILE_LIMIT,
             post_install: None,
+            archive_script: None,
         }
     }
 }
@@ -122,6 +166,8 @@ pub enum InstallError {
     MultipleMatches,
     /// The explicit post-install command failed after the file was installed.
     PostInstallFailed(ExitStatus),
+    /// The explicitly requested archive script failed to run successfully.
+    ScriptFailed(ExitStatus),
 }
 impl fmt::Display for InstallError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -139,6 +185,9 @@ impl fmt::Display for InstallError {
                 f,
                 "post-install command failed after installation: {status}"
             ),
+            Self::ScriptFailed(status) => {
+                write!(f, "archive script failed after installation: {status}")
+            }
         }
     }
 }
@@ -221,7 +270,9 @@ fn validate_digest(digest: &str) -> Result<String, InstallError> {
 ///
 /// Redirects are restricted to HTTPS. The destination must not exist. This
 /// function is blocking and never elevates privileges. If a post-install
-/// command fails, the installed file remains in place.
+/// command or an explicitly requested [`InstallOptions::archive_script`]
+/// fails, the installed file remains in place. Archive scripts run only after
+/// the checksum matches.
 pub fn install_https(url: &str, options: &InstallOptions) -> Result<PathBuf, InstallError> {
     let parsed = reqwest::Url::parse(url).map_err(|_| InstallError::Invalid("invalid URL"))?;
     if parsed.scheme() != "https" {
@@ -254,7 +305,8 @@ pub fn install_https(url: &str, options: &InstallOptions) -> Result<PathBuf, Ins
 ///
 /// The stream is bounded by `max_download_bytes` and is never unpacked before
 /// its SHA-256 matches. This method does not authenticate the source of the
-/// caller-provided checksum.
+/// caller-provided checksum. An [`InstallOptions::archive_script`] runs only
+/// after the digest matches and is bounded by `max_file_bytes`.
 pub fn install_reader(
     mut reader: impl Read,
     options: &InstallOptions,
@@ -282,44 +334,40 @@ pub fn install_reader(
         return Err(InstallError::ChecksumMismatch);
     }
     archive.rewind()?;
-    install_verified_archive(archive.as_file_mut(), options)
+    install_inner(archive.as_file_mut(), options)
 }
 
 /// Install from an already verified local archive.
 ///
 /// This function does not verify `options.sha256`; use [`install_https`] for
-/// downloads. No archive paths are extracted directly to the filesystem.
+/// downloads. No archive paths are extracted directly to the filesystem. For
+/// the same reason it rejects [`InstallOptions::archive_script`], because an
+/// archive-provided script must only run after a checksum match.
 pub fn install_verified_archive(
     file: &mut File,
     options: &InstallOptions,
 ) -> Result<PathBuf, InstallError> {
+    if options.archive_script.is_some() {
+        return Err(InstallError::Invalid(
+            "archive scripts require a checksum-verified install",
+        ));
+    }
+    install_inner(file, options)
+}
+
+fn install_inner(file: &mut File, options: &InstallOptions) -> Result<PathBuf, InstallError> {
     let matcher = Matcher::new(&options.grep)?;
     if let Some(name) = &options.rename {
         validate_name(&normalize_exe(name))?;
     }
-    let mut staged = NamedTempFile::new_in(&options.target_dir)?;
-    let selected = match options.format {
-        Format::Zip => select_zip(file, &matcher, &mut staged, options.max_file_bytes)?,
-        Format::Tar => select_tar(file, &matcher, &mut staged, options.max_file_bytes)?,
-        Format::TarGz => select_tar(
-            flate2::read::GzDecoder::new(file),
-            &matcher,
-            &mut staged,
-            options.max_file_bytes,
-        )?,
-        Format::TarXz => select_tar(
-            xz2::read::XzDecoder::new(file),
-            &matcher,
-            &mut staged,
-            options.max_file_bytes,
-        )?,
-        Format::TarBz2 => select_tar(
-            bzip2::read::BzDecoder::new(file),
-            &matcher,
-            &mut staged,
-            options.max_file_bytes,
-        )?,
+    // Validate and extract an explicitly requested script before touching the
+    // destination, so an unsafe or oversized script aborts the install.
+    let script = match &options.archive_script {
+        Some(script) => Some(prepare_script(file, options, script)?),
+        None => None,
     };
+    let mut staged = NamedTempFile::new_in(&options.target_dir)?;
+    let selected = select_member(file, options, &matcher, &mut staged)?;
     let name = options.rename.as_deref().unwrap_or(&selected);
     let name = normalize_exe(name);
     validate_name(&name)?;
@@ -334,6 +382,9 @@ pub fn install_verified_archive(
     staged
         .persist_noclobber(&target)
         .map_err(|e| InstallError::Io(e.error))?;
+    if let (Some(script), Some((dir, staged))) = (&options.archive_script, script) {
+        run_script(&dir, &staged, script)?;
+    }
     if let Some(command) = &options.post_install {
         let status = Command::new(&command.program)
             .args(&command.args)
@@ -343,6 +394,123 @@ pub fn install_verified_archive(
         }
     }
     Ok(target)
+}
+
+fn select_member(
+    file: &mut File,
+    options: &InstallOptions,
+    matcher: &Matcher,
+    dest: &mut NamedTempFile,
+) -> Result<String, InstallError> {
+    file.rewind()?;
+    match options.format {
+        Format::Zip => select_zip(file, matcher, dest, options.max_file_bytes),
+        Format::Tar => select_tar(file, matcher, dest, options.max_file_bytes),
+        Format::TarGz => select_tar(
+            flate2::read::GzDecoder::new(file),
+            matcher,
+            dest,
+            options.max_file_bytes,
+        ),
+        Format::TarXz => select_tar(
+            xz2::read::XzDecoder::new(file),
+            matcher,
+            dest,
+            options.max_file_bytes,
+        ),
+        Format::TarBz2 => select_tar(
+            bzip2::read::BzDecoder::new(file),
+            matcher,
+            dest,
+            options.max_file_bytes,
+        ),
+    }
+}
+
+/// Extract one explicitly selected regular file into a private directory.
+///
+/// The returned directory is removed when dropped. Selection reuses the same
+/// member rules as the executable: exactly one regular file, a relative path
+/// without `..`, and a size bounded by `max_file_bytes`.
+fn prepare_script(
+    file: &mut File,
+    options: &InstallOptions,
+    script: &ArchiveScript,
+) -> Result<(tempfile::TempDir, tempfile::TempPath), InstallError> {
+    #[cfg(not(unix))]
+    {
+        let _ = (file, options, script);
+        return Err(InstallError::Invalid(
+            "archive scripts are not supported on this platform",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        let matcher = Matcher::new(&script.selector)?;
+        let dir = tempfile::TempDir::new()?;
+        let mut staged = NamedTempFile::new_in(dir.path())?;
+        select_member(file, options, &matcher, &mut staged)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            staged
+                .as_file()
+                .set_permissions(std::fs::Permissions::from_mode(0o700))?;
+            validate_shebang(staged.as_file_mut())?;
+        }
+        staged.as_file().flush()?;
+        // Closing the writable handle before execution avoids `ETXTBSY`, and the
+        // `TempPath` still removes the script when it is dropped.
+        Ok((dir, staged.into_temp_path()))
+    }
+}
+
+/// Require a `#!` line that names an absolute interpreter.
+///
+/// `execvp` falls back to `/bin/sh` when an `execve` call reports `ENOEXEC`,
+/// which can run a shebang-less file through a shell. A bare `#!` line can do
+/// the same, so both are rejected here.
+#[cfg(unix)]
+fn validate_shebang(file: &mut File) -> Result<(), InstallError> {
+    file.rewind()?;
+    let mut head = Vec::new();
+    (&*file)
+        .take(256)
+        .read_to_end(&mut head)
+        .map_err(InstallError::Io)?;
+    let line = head.strip_prefix(b"#!").ok_or(InstallError::Invalid(
+        "archive script must begin with a shebang",
+    ))?;
+    let line = line.split(|b| *b == b'\n').next().unwrap_or(line);
+    let interpreter = line
+        .split(|b| matches!(*b, b' ' | b'\t' | b'\r'))
+        .find(|part| !part.is_empty());
+    match interpreter {
+        Some(path) if path.starts_with(b"/") => Ok(()),
+        _ => Err(InstallError::Invalid(
+            "archive script shebang must name an absolute interpreter",
+        )),
+    }
+}
+
+/// Execute a prepared archive script without an explicit shell wrapper.
+///
+/// `args` are passed verbatim and the private temporary directory is the
+/// working directory; the caller's environment is inherited.
+fn run_script(
+    dir: &tempfile::TempDir,
+    staged: &tempfile::TempPath,
+    script: &ArchiveScript,
+) -> Result<ExitStatus, InstallError> {
+    let status = Command::new(staged)
+        .args(&script.args)
+        .current_dir(dir.path())
+        .status()?;
+    if status.success() {
+        Ok(status)
+    } else {
+        Err(InstallError::ScriptFailed(status))
+    }
 }
 
 fn basename(path: &str) -> Result<String, InstallError> {
