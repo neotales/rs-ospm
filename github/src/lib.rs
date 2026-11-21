@@ -37,6 +37,12 @@ pub enum Error {
     Invalid(&'static str),
     /// GitHub API request or JSON decoding failed.
     Http(reqwest::Error),
+    /// The API answered with a non-success HTTP status.
+    ///
+    /// A redirect status appears here when the client refused to follow it,
+    /// either because it would leave HTTPS or because the redirect limit was
+    /// reached.
+    Status(reqwest::StatusCode),
     /// No unique asset could be selected.
     Selection(SelectionError),
     /// The download or installation failed.
@@ -47,12 +53,53 @@ impl fmt::Display for Error {
         match self {
             Self::Invalid(e) => write!(f, "GitHub provider: {e}"),
             Self::Http(e) => write!(f, "GitHub API: {e}"),
+            Self::Status(s) => write!(f, "GitHub API returned HTTP {s}"),
             Self::Selection(e) => write!(f, "GitHub release asset: {e}"),
             Self::Install(e) => write!(f, "GitHub release installation: {e}"),
         }
     }
 }
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Http(e) => Some(e),
+            Self::Selection(e) => Some(e),
+            Self::Install(e) => Some(e),
+            Self::Invalid(_) | Self::Status(_) => None,
+        }
+    }
+}
+
+/// Reject values that the URL segment encoder would silently drop.
+///
+/// `Url::path_segments_mut` omits `.` and `..` segments, so accepting them
+/// would request a different endpoint than the caller named.
+fn validate_segment(value: &str, message: &'static str) -> Result<(), Error> {
+    if value.is_empty() || value == "." || value == ".." {
+        return Err(Error::Invalid(message));
+    }
+    Ok(())
+}
+
+/// Maximum number of redirects followed before returning the redirect.
+const MAX_REDIRECTS: usize = 10;
+
+/// Follow a redirect only while it stays on HTTPS and within the limit.
+///
+/// `previous` counts the initial request plus every redirect already
+/// followed, matching `reqwest::redirect::Attempt::previous`.
+fn should_follow_redirect(previous: usize, next_scheme: &str) -> bool {
+    next_scheme == "https" && previous <= MAX_REDIRECTS
+}
+
+/// Convert a non-success API status into an error.
+fn ensure_success(status: reqwest::StatusCode) -> Result<(), Error> {
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(Error::Status(status))
+    }
+}
 
 /// Blocking GitHub release client.
 #[derive(Clone, Debug)]
@@ -84,10 +131,10 @@ impl Github {
             .user_agent("neotales-ospm-github")
             .timeout(Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                if attempt.previous().len() >= 10 || attempt.url().scheme() != "https" {
-                    attempt.stop()
-                } else {
+                if should_follow_redirect(attempt.previous().len(), attempt.url().scheme()) {
                     attempt.follow()
+                } else {
+                    attempt.stop()
                 }
             }))
             .build()
@@ -102,10 +149,33 @@ impl Github {
         repository: &str,
         tag: Option<&str>,
     ) -> Result<Release, Error> {
-        if owner.is_empty() || repository.is_empty() || tag == Some("") {
-            return Err(Error::Invalid(
-                "owner, repository, and tag must not be empty",
-            ));
+        let url = self.endpoint(owner, repository, tag)?;
+        let response = self
+            .client
+            .get(url)
+            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+            .send()
+            .map_err(Error::Http)?;
+        ensure_success(response.status())?;
+        response.json().map_err(Error::Http)
+    }
+
+    /// Build the API URL for a repository release.
+    ///
+    /// Each caller-supplied value becomes exactly one percent-encoded path
+    /// segment, so a tag containing `/`, `#`, `%`, or a space cannot alter the
+    /// endpoint. `.` and `..` are rejected rather than dropped by the
+    /// encoder.
+    fn endpoint(
+        &self,
+        owner: &str,
+        repository: &str,
+        tag: Option<&str>,
+    ) -> Result<reqwest::Url, Error> {
+        validate_segment(owner, "owner must not be empty, '.', or '..'")?;
+        validate_segment(repository, "repository must not be empty, '.', or '..'")?;
+        if let Some(tag) = tag {
+            validate_segment(tag, "tag must not be empty, '.', or '..'")?;
         }
         let mut url = self.api.clone();
         {
@@ -123,16 +193,7 @@ impl Github {
                 }
             }
         }
-        let response = self
-            .client
-            .get(url)
-            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-            .send()
-            .map_err(Error::Http)?;
-        if !response.status().is_success() {
-            return Err(Error::Invalid("API returned a non-success response"));
-        }
-        response.json().map_err(Error::Http)
+        Ok(url)
     }
 }
 
@@ -168,5 +229,126 @@ impl Release {
     ) -> Result<PathBuf, Error> {
         let asset = self.select(target, selection)?;
         install_https(&asset.browser_download_url, install).map_err(Error::Install)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn client(base: &str) -> Github {
+        Github::with_api_base(base).expect("valid test API base")
+    }
+
+    // The URL cannot be observed through the public API without a TLS server,
+    // so endpoint construction is asserted directly here.
+    #[test]
+    fn latest_endpoint_is_appended_to_base_with_or_without_trailing_slash() {
+        for base in ["https://api.github.com", "https://api.github.com/"] {
+            let url = client(base).endpoint("owner", "repo", None).unwrap();
+            assert_eq!(
+                url.as_str(),
+                "https://api.github.com/repos/owner/repo/releases/latest"
+            );
+        }
+    }
+
+    #[test]
+    fn enterprise_base_keeps_its_path_prefix() {
+        let url = client("https://ghe.example/api/v3/")
+            .endpoint("owner", "repo", Some("v1.0.0"))
+            .unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://ghe.example/api/v3/repos/owner/repo/releases/tags/v1.0.0"
+        );
+    }
+
+    #[test]
+    fn caller_values_become_single_percent_encoded_segments() {
+        let url = client("https://api.github.com/")
+            .endpoint("weird owner", "repo/name", Some("release/v1 #1"))
+            .unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://api.github.com/repos/weird%20owner/repo%2Fname/releases/tags/release%2Fv1%20%231"
+        );
+    }
+
+    #[test]
+    fn percent_in_caller_value_is_encoded_once() {
+        let url = client("https://api.github.com/")
+            .endpoint("owner", "repo", Some("v1%2F"))
+            .unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://api.github.com/repos/owner/repo/releases/tags/v1%252F"
+        );
+    }
+
+    #[test]
+    fn dot_segments_are_rejected_instead_of_being_dropped() {
+        let client = client("https://api.github.com/");
+        let cases = [
+            ("", "repo", None),
+            ("owner", "", None),
+            ("owner", "repo", Some("")),
+            (".", "repo", None),
+            ("..", "repo", None),
+            ("owner", ".", None),
+            ("owner", "..", None),
+            ("owner", "repo", Some(".")),
+            ("owner", "repo", Some("..")),
+        ];
+        for (owner, repository, tag) in cases {
+            assert!(
+                matches!(
+                    client.endpoint(owner, repository, tag),
+                    Err(Error::Invalid(_))
+                ),
+                "accepted owner={owner:?} repository={repository:?} tag={tag:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_success_statuses_are_status_errors_not_input_errors() {
+        for status in [
+            reqwest::StatusCode::FOUND,
+            reqwest::StatusCode::UNAUTHORIZED,
+            reqwest::StatusCode::FORBIDDEN,
+            reqwest::StatusCode::NOT_FOUND,
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+        ] {
+            match ensure_success(status) {
+                Err(Error::Status(actual)) => assert_eq!(actual, status),
+                other => panic!("expected a status error for {status}, got {other:?}"),
+            }
+        }
+        assert!(ensure_success(reqwest::StatusCode::OK).is_ok());
+        assert_eq!(
+            ensure_success(reqwest::StatusCode::NOT_FOUND)
+                .unwrap_err()
+                .to_string(),
+            "GitHub API returned HTTP 404 Not Found"
+        );
+    }
+
+    #[test]
+    fn redirects_must_stay_on_https_and_stop_at_the_limit() {
+        for previous in 0..=MAX_REDIRECTS {
+            assert!(should_follow_redirect(previous, "https"));
+        }
+        assert!(!should_follow_redirect(MAX_REDIRECTS + 1, "https"));
+        for scheme in ["http", "ftp", "file", ""] {
+            assert!(!should_follow_redirect(0, scheme), "followed {scheme}");
+        }
+    }
+
+    #[test]
+    fn selection_errors_expose_a_source() {
+        let error = Error::Selection(SelectionError::Ambiguous);
+        assert!(std::error::Error::source(&error).is_some());
     }
 }
