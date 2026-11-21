@@ -1,12 +1,11 @@
 # Releasing
 
 The crates share a version. The `v*` tag must match the literal version in both
-`core/Cargo.toml` and `apt/Cargo.toml`. Keep the core dependency version in
-`apt/Cargo.toml` in sync.
+all four crate manifests. Keep both dependencies on core in sync.
 
 The first version, `0.0.0-alpha.0`, must be uploaded manually: run
 `~/work/rs/publish.sh` for `core/` first, wait for the registry index, then run
-it for `apt/`. Configure the trusted publisher on each crate for the
+it for `apt-shim/`, `apt/`, and `apt-cli/`. Configure the trusted publisher on each crate for the
 `neotales/rs-ospm` repository, `release.yml` workflow and an empty environment.
 Do not put a token in the repository.
 

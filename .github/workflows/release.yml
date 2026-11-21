@@ -16,6 +16,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           cache-key: release
+      - run: sudo apt-get update && sudo apt-get install -y libapt-pkg-dev
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features
@@ -27,7 +28,7 @@ jobs:
           python3 - <<'PY'
           import os, tomllib
           versions = []
-          for path in ("core/Cargo.toml", "apt/Cargo.toml"):
+          for path in ("core/Cargo.toml", "apt/Cargo.toml", "apt-cli/Cargo.toml", "apt-shim/Cargo.toml"):
               with open(path, "rb") as f:
                   versions.append(tomllib.load(f)["package"]["version"])
           if len(set(versions)) != 1 or os.environ["TAG"] != "v" + versions[0]:
@@ -46,9 +47,10 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           cache-key: release-publish
+      - run: sudo apt-get update && sudo apt-get install -y libapt-pkg-dev
       - uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
         id: auth
-      - name: Publish core, then APT
+      - name: Publish core, then APT crates
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: |
@@ -85,4 +87,6 @@ jobs:
             return 1
           }
           publish_crate neotales-ospm-core
+          publish_crate neotales-ospm-apt-shim
           publish_crate neotales-ospm-apt
+          publish_crate neotales-ospm-apt-cli

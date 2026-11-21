@@ -66,3 +66,12 @@ pub trait Remove {
     /// Remove a package without promising removal of configuration or dependencies.
     fn remove(&self, package: &PackageName) -> Result<(), Self::Error>;
 }
+
+/// Checks whether a package is installed.
+pub trait IsInstalled {
+    /// Backend-specific error.
+    type Error: Error + Send + Sync + 'static;
+
+    /// Checks the manager's package database.
+    fn is_installed(&self, package: &PackageName) -> Result<bool, Self::Error>;
+}

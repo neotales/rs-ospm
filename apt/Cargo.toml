@@ -1,6 +1,6 @@
 [package]
 name = "neotales-ospm-apt"
-description = "APT backend for operating system package management"
+description = "Rust client for the neotales APT C ABI"
 version = "0.0.0-alpha.0"
 edition = "2024"
 rust-version = "1.100"
@@ -8,14 +8,10 @@ license = "MIT"
 authors = ["x0craft"]
 repository = "https://github.com/neotales/rs-ospm"
 readme = "README.md"
-categories = ["os"]
-
-[features]
-default = []
-cli = ["dep:neotales-ospm-core"]
 
 [dependencies]
-neotales-ospm-core = { path = "../core", version = "0.0.0-alpha.0", optional = true }
+libloading = "0.8"
+neotales-ospm-core = { path = "../core", version = "0.0.0-alpha.0" }
 
 [lints]
 workspace = true

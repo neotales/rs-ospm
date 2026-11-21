@@ -39,6 +39,10 @@ jobs:
         with:
           cache-key: ci
 
+      - name: Install APT development headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libapt-pkg-dev
+
       - name: Format
         run: cargo fmt --all -- --check
 
@@ -47,6 +51,13 @@ jobs:
 
       - name: Test
         run: cargo test --workspace --all-targets --all-features
+
+      - name: Test the native shared-library boundary
+        if: runner.os == 'Linux'
+        run: |
+          cargo build -p neotales-ospm-apt-shim --features native
+          export NEOTALES_OSPM_APT_SHIM="$(pwd)/target/debug/libneotales_ospm_apt_shim.so"
+          cargo test -p neotales-ospm-apt --test ffi native_shim_when_configured
 
       # `--all-targets` does not run doctests.
       - name: Doc tests
@@ -70,6 +81,9 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           cache-key: msrv
+
+      - name: Install APT development headers
+        run: sudo apt-get update && sudo apt-get install -y libapt-pkg-dev
 
       # Every workspace member must declare the same minimum, not just the
       # first package cargo happens to list.

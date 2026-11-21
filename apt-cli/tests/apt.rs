@@ -1,6 +1,6 @@
 //! Tests for the portable API and the APT process boundary.
 #![cfg(feature = "cli")]
-use neotales_ospm_apt::{Apt, PackageError};
+use neotales_ospm_apt_cli::{Apt, PackageError};
 use neotales_ospm_core::{Install, PackageName, Remove};
 
 #[test]
@@ -17,6 +17,16 @@ fn package_names_reject_options_and_shell_syntax() {
 fn native_command_exposes_the_configured_executable() {
     let apt = Apt::with_executable("custom-apt");
     assert_eq!(apt.command().get_program(), "custom-apt");
+}
+
+#[cfg(unix)]
+#[test]
+fn captured_output_is_available_to_callers() {
+    let output = Apt::with_executable("printf")
+        .output(["%s", "rewritable output"])
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"rewritable output");
 }
 
 #[cfg(unix)]

@@ -4,16 +4,13 @@ Rust crates for operating system package managers.
 
 | Crate | Purpose |
 | --- | --- |
-| [`neotales-ospm-core`](core/) | Portable, independently implemented capabilities |
-| [`neotales-ospm-apt`](apt/) | APT support; an opt-in CLI fallback is available |
+| [`neotales-ospm-core`](core/) | Portable capability traits |
+| [`neotales-ospm-apt`](apt/) | MIT client for the APT C ABI |
+| [`neotales-ospm-apt-shim`](apt-shim/) | LGPL C ABI over `libapt-pkg` |
+| [`neotales-ospm-apt-cli`](apt-cli/) | Explicit process-based APT backend |
 
-Prefer a supported native API or FFI binding for each operation. Use a command
-only when a suitable API is unavailable, and make that fallback explicit. Each
-manager can expose its own native API alongside the portable traits; unsupported
-capabilities need not be implemented. No FFI backend is implemented yet.
+The native implementation currently supports installed-status queries only.
+The process backend supports install and remove. There is no automatic fallback.
 
-APT's current CLI fallback is opt-in and does not elevate privileges or supply
-automatic confirmation. Future backends should document their native API,
-library dependencies, privilege requirements and any CLI fallback.
-
-All crates share a version. See [RELEASE.md](RELEASE.md) for publishing.
+The shim depends on GPL-2.0-or-later `libapt-pkg`. The MIT and LGPL licences
+of our code do not change the obligations of distributing the combined software.

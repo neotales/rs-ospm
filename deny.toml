@@ -30,6 +30,7 @@ ignore = []
 [licenses]
 allow = [
   "MIT",
+  "LGPL-2.1-or-later",
   "Apache-2.0",
   "BSD-3-Clause",
   "ISC",
