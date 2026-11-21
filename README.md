@@ -15,6 +15,7 @@ Rust crates for operating system package managers.
 | [`neotales-ospm-release`](release/) | Release asset selection and platform mappings |
 | [`neotales-ospm-github`](github/) | GitHub releases and verified asset installation |
 | [`neotales-ospm-gitlab`](gitlab/) | GitLab releases and verified asset installation |
+| [`neotales-ospm-aqua`](aqua/) | Strict subset of Aqua GitHub release recipes |
 
 The native implementation currently supports installed-status queries only.
 The process backend supports install, remove, update, list, search, source

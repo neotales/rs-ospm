@@ -1,0 +1,21 @@
+[package]
+name = "neotales-ospm-aqua"
+description = "Strict Aqua registry release recipe support"
+version = "0.0.0-alpha.0"
+edition = "2024"
+rust-version = "1.100"
+license = "MIT"
+authors = ["x0craft"]
+repository = "https://github.com/neotales/rs-ospm"
+readme = "README.md"
+
+[dependencies]
+neotales-ospm-archive = { path = "../archive", version = "0.0.0-alpha.0" }
+neotales-ospm-github = { path = "../github", version = "0.0.0-alpha.0" }
+neotales-ospm-release = { path = "../release", version = "0.0.0-alpha.0" }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde-saphyr = "0.0.21"
+
+[lints]
+workspace = true
