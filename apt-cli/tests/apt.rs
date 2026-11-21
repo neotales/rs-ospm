@@ -2,7 +2,8 @@
 #![cfg(feature = "cli")]
 use neotales_ospm_apt_cli::{Apt, PackageError};
 use neotales_ospm_core::{
-    Install, InstallFile, List, PackageName, Pin, Remove, Search, Update, UpdateSources,
+    Install, InstallFile, List, PackageName, Pin, QueryOptions, Remove, Search, Update,
+    UpdateSources,
 };
 
 #[test]
@@ -105,6 +106,7 @@ case "$1" in
   --show) printf 'curl:amd64\t1:8.0-1\tinstalled\nold\t1.0\tconfig-files\n' ;;
   search) printf 'curl - transfer data\n' ;;
   --no-all-versions) printf 'Package: curl\nVersion: 1:8.0-1\nArchitecture: amd64\nDescription: transfer data\n extended description\n\n' ;;
+  show) printf 'Package: curl\nVersion: 1:8.0-1\nArchitecture: amd64\n\nPackage: curl\nVersion: 1:7.0-1\nArchitecture: amd64\n\n' ;;
 esac
 "#).unwrap();
     fs::set_permissions(&tool, fs::Permissions::from_mode(0o700)).unwrap();
@@ -137,17 +139,38 @@ esac
         fs::read_to_string(dir.join("tool.args")).unwrap(),
         format!("install\n--\n{}\n", file.display())
     );
-    let installed = manager.list().unwrap();
+    let defaults = QueryOptions::default();
+    let installed = manager.list("", &defaults).unwrap();
     assert_eq!(installed.len(), 1);
     assert_eq!(
         (&*installed[0].name, &*installed[0].version),
         ("curl:amd64", "1:8.0-1")
     );
-    let found = manager.search("curl").unwrap();
+    assert_eq!(manager.list("not-matching", &defaults).unwrap().len(), 0);
+    let found = manager.search("curl", &defaults).unwrap();
     assert_eq!(found.len(), 1);
     assert_eq!((&*found[0].name, &*found[0].version), ("curl", "1:8.0-1"));
     assert_eq!(found[0].metadata["architecture"], "amd64");
-    assert!(manager.search("").is_err());
+    let options = QueryOptions {
+        version: Some("1:7.0-1".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        manager.search("curl", &options).unwrap()[0].version,
+        "1:7.0-1"
+    );
+    assert!(manager.list("", &options).unwrap().is_empty());
+    let mut unsupported = QueryOptions::default();
+    unsupported.extra.insert("custom".into(), Box::new(42_u32));
+    assert!(matches!(
+        manager.search("curl", &unsupported),
+        Err(PackageError::UnsupportedOption(_))
+    ));
+    assert!(matches!(
+        manager.list("", &unsupported),
+        Err(PackageError::UnsupportedOption(_))
+    ));
+    assert!(manager.search("", &defaults).is_err());
     fs::remove_file(file).unwrap();
     fs::remove_file(dir.join("tool.args")).unwrap();
     fs::remove_file(tool).unwrap();
@@ -160,16 +183,34 @@ fn real_apt_read_operations_when_configured() {
         return;
     }
     let manager = Apt::new();
-    let installed = manager.list().unwrap();
+    let options = QueryOptions::default();
+    let installed = manager.list("", &options).unwrap();
     assert!(
         installed
             .iter()
             .any(|p| p.name.starts_with("bash") && !p.version.is_empty())
     );
-    let found = manager.search("^bash$").unwrap();
+    let found = manager.search("^bash$", &options).unwrap();
     assert!(
         found
             .iter()
             .any(|p| p.name == "bash" && !p.version.is_empty())
+    );
+    let version = found
+        .iter()
+        .find(|p| p.name == "bash")
+        .unwrap()
+        .version
+        .clone();
+    let versioned = QueryOptions {
+        version: Some(version.clone()),
+        ..Default::default()
+    };
+    assert!(
+        manager
+            .search("^bash$", &versioned)
+            .unwrap()
+            .iter()
+            .any(|p| p.version == version)
     );
 }

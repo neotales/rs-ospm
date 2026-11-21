@@ -22,6 +22,28 @@ pub struct Package {
     pub metadata: BTreeMap<String, String>,
 }
 
+/// Options for listing or searching packages.
+#[derive(Default)]
+pub struct QueryOptions {
+    /// Match this exact manager-specific version when present.
+    pub version: Option<String>,
+    /// Provider-specific, thread-safe values. Drivers downcast supported keys
+    /// to their documented types.
+    ///
+    /// Providers document supported keys and should reject unknown keys rather
+    /// than silently ignore them.
+    pub extra: BTreeMap<String, Box<dyn std::any::Any + Send + Sync>>,
+}
+
+impl fmt::Debug for QueryOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("QueryOptions")
+            .field("version", &self.version)
+            .field("extra_keys", &self.extra.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
 /// A package source in the target manager's namespace.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Source {
@@ -112,8 +134,9 @@ pub trait Update {
 pub trait List {
     /// Backend-specific error.
     type Error: Error + Send + Sync + 'static;
-    /// Return installed packages with the installed version.
-    fn list(&self) -> Result<Vec<Package>, Self::Error>;
+    /// Return installed packages with the installed version. Query syntax is
+    /// backend-specific; an empty query requests all installed packages.
+    fn list(&self, query: &str, options: &QueryOptions) -> Result<Vec<Package>, Self::Error>;
 }
 
 /// Searches available packages.
@@ -122,7 +145,7 @@ pub trait Search {
     type Error: Error + Send + Sync + 'static;
     /// Search using the backend's query syntax. Versions are manager-selected
     /// or explicitly documented by the backend.
-    fn search(&self, query: &str) -> Result<Vec<Package>, Self::Error>;
+    fn search(&self, query: &str, options: &QueryOptions) -> Result<Vec<Package>, Self::Error>;
 }
 
 /// Optional source management capability.

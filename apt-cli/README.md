@@ -35,10 +35,13 @@ Apt::new().install(&package)?;
 elevate privileges. The separate `neotales-ospm-apt` crate provides native APT
 queries.
 
-The `List` capability returns installed versions from `dpkg-query`. `Search`
-uses APT's regular-expression search syntax and returns the versions selected by
-`apt-cache --no-all-versions show`, with architecture and description when
-available. `Update` upgrades a named package, and `UpdateSources` refreshes
+The `List` capability returns installed versions from `dpkg-query`, matching
+the query as a name substring (an empty query lists all). `Search` uses APT's
+regular-expression search syntax and returns versions selected by `apt-cache`;
+when a version is specified, it checks all available versions for an exact
+match. Results include architecture and description when available. Neither
+operation currently supports provider-specific options. `Update` upgrades a
+named package, and `UpdateSources` refreshes
 repository metadata. Holds and local `.deb` installation are supported;
 source add and remove are not. No command runs through a shell.
 

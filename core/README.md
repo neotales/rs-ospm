@@ -30,7 +30,9 @@ fn install_curl<M: Install>(manager: &M) -> Result<(), M::Error> {
 
 Package names are manager-specific; the portable type accepts a conservative subset.
 `List` returns installed packages; `Search` returns available packages. Both
-return a name, version, and backend-specific metadata. `Update` upgrades a
+take a query string and `QueryOptions`, including an optional exact version and
+provider-specific values. Results contain a name, version, and backend-specific
+metadata. `Update` upgrades a
 package, while the optional `UpdateSources` capability refreshes sources.
 `Sources`, `Pin`, and `InstallFile` are separate optional capabilities.
 

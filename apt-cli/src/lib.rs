@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Output, Stdio};
 
 use neotales_ospm_core::{
-    Install, InstallFile, List, Package, PackageName, Pin, Remove, Search, Update, UpdateSources,
+    Install, InstallFile, List, Package, PackageName, Pin, QueryOptions, Remove, Search, Update,
+    UpdateSources,
 };
 
 /// Failure while invoking the APT command-line fallback.
@@ -23,6 +24,8 @@ pub enum PackageError {
     Io(std::io::Error),
     /// The supplied search query cannot be passed to APT.
     InvalidQuery,
+    /// A provider-specific option is not supported.
+    UnsupportedOption(String),
     /// The manager's output was not valid UTF-8 or did not match the expected format.
     InvalidOutput,
     /// The command returned an unsuccessful status.
@@ -39,6 +42,7 @@ impl fmt::Display for PackageError {
         match self {
             Self::Io(error) => write!(f, "package manager process: {error}"),
             Self::InvalidQuery => f.write_str("invalid empty or NUL-containing search query"),
+            Self::UnsupportedOption(key) => write!(f, "unsupported APT query option: {key}"),
             Self::InvalidOutput => f.write_str("invalid package manager output"),
             Self::CommandFailed { status, stderr } => write!(
                 f,
@@ -53,7 +57,10 @@ impl Error for PackageError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
-            Self::CommandFailed { .. } | Self::InvalidQuery | Self::InvalidOutput => None,
+            Self::CommandFailed { .. }
+            | Self::InvalidQuery
+            | Self::UnsupportedOption(_)
+            | Self::InvalidOutput => None,
         }
     }
 }
@@ -231,7 +238,8 @@ fn text_output(command: &mut Command) -> Result<String, PackageError> {
 
 impl List for Apt {
     type Error = PackageError;
-    fn list(&self) -> Result<Vec<Package>, Self::Error> {
+    fn list(&self, query: &str, options: &QueryOptions) -> Result<Vec<Package>, Self::Error> {
+        validate_options(options)?;
         let output = text_output(Command::new(&self.dpkg_query).args([
             "--show",
             "--showformat=${binary:Package}\\t${Version}\\t${db:Status-Status}\\n",
@@ -248,6 +256,14 @@ impl List for Apt {
                 if name.is_empty() || version.is_empty() {
                     return Err(PackageError::InvalidOutput);
                 }
+                if !name.contains(query)
+                    || options
+                        .version
+                        .as_ref()
+                        .is_some_and(|wanted| wanted != version)
+                {
+                    continue;
+                }
                 packages.push(Package {
                     name: name.into(),
                     version: version.into(),
@@ -261,7 +277,8 @@ impl List for Apt {
 
 impl Search for Apt {
     type Error = PackageError;
-    fn search(&self, query: &str) -> Result<Vec<Package>, Self::Error> {
+    fn search(&self, query: &str, options: &QueryOptions) -> Result<Vec<Package>, Self::Error> {
+        validate_options(options)?;
         if query.is_empty() || query.contains('\0') {
             return Err(PackageError::InvalidQuery);
         }
@@ -276,11 +293,25 @@ impl Search for Apt {
             return Ok(Vec::new());
         }
         let mut command = Command::new(&self.apt_cache);
-        command.args(["--no-all-versions", "show", "--"]);
+        if options.version.is_none() {
+            command.arg("--no-all-versions");
+        }
+        command.args(["show", "--"]);
         command.args(names.iter().map(PackageName::as_str));
         let details = text_output(&mut command)?;
-        parse_details(&details)
+        let mut packages = parse_details(&details)?;
+        if let Some(version) = &options.version {
+            packages.retain(|package| &package.version == version);
+        }
+        Ok(packages)
     }
+}
+
+fn validate_options(options: &QueryOptions) -> Result<(), PackageError> {
+    if let Some(key) = options.extra.keys().next() {
+        return Err(PackageError::UnsupportedOption(key.clone()));
+    }
+    Ok(())
 }
 
 fn parse_details(details: &str) -> Result<Vec<Package>, PackageError> {
