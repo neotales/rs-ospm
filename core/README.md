@@ -32,7 +32,8 @@ Package names are manager-specific; the portable type accepts a conservative sub
 `List` returns installed packages; `Search` returns available packages. Both
 take a query string and `QueryOptions`, including an optional exact version and
 provider-specific values. Results contain a name, version, and backend-specific
-metadata. `Update` upgrades a
+metadata. `list_all()` lists all installed packages with default options.
+`Update` upgrades a
 package, while the optional `UpdateSources` capability refreshes sources.
 `Sources`, `Pin`, and `InstallFile` are separate optional capabilities.
 

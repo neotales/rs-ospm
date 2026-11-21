@@ -141,6 +141,7 @@ esac
     );
     let defaults = QueryOptions::default();
     let installed = manager.list("", &defaults).unwrap();
+    assert_eq!(manager.list_all().unwrap(), installed);
     assert_eq!(installed.len(), 1);
     assert_eq!(
         (&*installed[0].name, &*installed[0].version),

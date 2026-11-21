@@ -137,6 +137,11 @@ pub trait List {
     /// Return installed packages with the installed version. Query syntax is
     /// backend-specific; an empty query requests all installed packages.
     fn list(&self, query: &str, options: &QueryOptions) -> Result<Vec<Package>, Self::Error>;
+
+    /// Return all installed packages using the backend's default options.
+    fn list_all(&self) -> Result<Vec<Package>, Self::Error> {
+        self.list("", &QueryOptions::default())
+    }
 }
 
 /// Searches available packages.
