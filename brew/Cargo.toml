@@ -1,0 +1,25 @@
+[package]
+name = "neotales-ospm-brew-cli"
+description = "Explicit process backend for Homebrew formulae and casks"
+version = "0.0.0-alpha.0"
+edition = "2024"
+rust-version = "1.100"
+license = "MIT"
+authors = ["x0craft"]
+repository = "https://github.com/neotales/rs-ospm"
+readme = "README.md"
+categories = ["os"]
+
+# Temporary: this crate is standalone until it is added to the rs-ospm
+# workspace. Remove the `[workspace]` and `[workspace.lints]` tables then, and
+# keep `[lints] workspace = true` so the root workspace lints still apply.
+[workspace]
+
+[workspace.lints.rust]
+missing_docs = "warn"
+
+[dependencies]
+serde_json = "1.0"
+
+[lints]
+workspace = true

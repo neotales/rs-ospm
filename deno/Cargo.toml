@@ -1,0 +1,28 @@
+# This crate is developed as a standalone workspace so it can be validated
+# without editing the parent workspace member list. When it joins the parent
+# workspace, remove this section and the local workspace lints below.
+[workspace]
+
+[workspace.lints.rust]
+missing_docs = "warn"
+
+[package]
+name = "neotales-ospm-deno-cli"
+description = "Explicit process backend for Deno global tools and project dependencies"
+version = "0.0.0-alpha.0"
+edition = "2024"
+rust-version = "1.100"
+license = "MIT"
+authors = ["x0craft"]
+repository = "https://github.com/neotales/rs-ospm"
+readme = "README.md"
+categories = ["os"]
+
+[dependencies]
+process-wrap = { version = "10", features = ["std"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
